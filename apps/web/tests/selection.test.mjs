@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness, tryOnTarget,
+  groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnQueue, tryOnReadiness,
 } from "../lib/selection.ts";
 
 const p = (retailer, id, category) => ({ retailer, product_id: id, category, name: `${category}-${id}` });
@@ -43,26 +43,30 @@ test("clicking the selected product again deselects it; removeCategory removes",
   assert.equal(Object.keys(s).length, 3); // original not mutated
 });
 
-test("one selected item is the try-on target automatically", () => {
-  const s = toggleSelect({}, products[0]);
-  assert.equal(keyOf(tryOnTarget(s, null)), "ebay:1");
-});
-
-test("several selected items: no target until the user marks exactly one", () => {
+test("try-on queue: base garments first, layers and accessories after", () => {
   let s = {};
-  for (const i of [0, 1, 3]) s = toggleSelect(s, products[i]);
-  assert.equal(tryOnTarget(s, null), null);
-  assert.equal(keyOf(tryOnTarget(s, "ebay:4")), "ebay:4");
-  assert.equal(tryOnTarget(s, "ebay:999"), null); // stale/removed target is ignored
-  assert.equal(tryOnTarget(removeCategory(s, "bags"), "ebay:4"), null); // removing the target clears it
+  for (const [r, id, c] of [["ebay", "1", "bags"], ["ebay", "2", "shoes"], ["ebay", "3", "outerwear"], ["ebay", "4", "tops"], ["ebay", "5", "bottoms"]])
+    s = toggleSelect(s, p(r, id, c));
+  assert.deepEqual(tryOnQueue(s).map((x) => x.category), ["tops", "bottoms", "outerwear", "shoes", "bags"]);
+  assert.equal(tryOnQueue({}).length, 0);
 });
 
-test("try-on readiness: one person + exactly one chosen product", () => {
-  assert.equal(tryOnReadiness(false, 1, true).ok, false);
-  assert.equal(tryOnReadiness(true, 0, false).ok, false);
-  assert.equal(tryOnReadiness(true, 1, true).ok, true);
-  const multi = tryOnReadiness(true, 4, false);
-  assert.equal(multi.ok, false);
-  assert.match(multi.message, /Try this one/);
-  assert.equal(tryOnReadiness(true, 4, true).ok, true); // 4 selected, 1 chosen -> only that one is sent
+test("readiness (mock): needs a person and at least one product, any number allowed", () => {
+  const q = (n) => Array.from({ length: n }, (_, i) => ({ retailer: i % 2 ? "aliexpress" : "ebay" }));
+  assert.equal(tryOnReadiness(false, q(1), null).ok, false);
+  assert.equal(tryOnReadiness(true, q(0), null).ok, false);
+  assert.equal(tryOnReadiness(true, q(1), null).ok, true);
+  assert.equal(tryOnReadiness(true, q(6), null).ok, true);
+});
+
+test("readiness (live): whole queue must fit the credit budget and be eBay-only", () => {
+  const ebay = (n) => Array.from({ length: n }, () => ({ retailer: "ebay" }));
+  const credits = (spent, cap) => ({ per_generation: 2, cap, spent });
+  assert.equal(tryOnReadiness(true, ebay(1), credits(0, 2)).ok, true);
+  const tooMany = tryOnReadiness(true, ebay(3), credits(0, 2));
+  assert.equal(tooMany.ok, false);
+  assert.match(tooMany.message, /allows 1 more generation /);
+  assert.equal(tryOnReadiness(true, ebay(3), credits(0, 6)).ok, true);
+  assert.match(tryOnReadiness(true, ebay(1), credits(2, 2)).message, /used up/);
+  assert.match(tryOnReadiness(true, [{ retailer: "aliexpress" }], credits(0, 6)).message, /eBay products only/);
 });

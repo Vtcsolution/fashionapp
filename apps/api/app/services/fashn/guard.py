@@ -44,16 +44,19 @@ def preflight_live(db: Session, job: TryOnJob, product: Product) -> None:
         raise LiveCallBlocked("FASHN_API_KEY not configured")
     if product.retailer != "ebay":
         raise LiveCallBlocked("the first live test must use an eBay product")
-    if not job.person_image_path.startswith("persons/") or not storage.abs_path(job.person_image_path).is_file():
-        raise LiveCallBlocked("person image missing")
+    # Step 1 starts from the uploaded person; later steps start from the previous step's raw result.
+    allowed_base = ("persons/",) if job.step <= 1 else ("results/",)
+    if not job.person_image_path.startswith(allowed_base) or not storage.abs_path(job.person_image_path).is_file():
+        raise LiveCallBlocked("base image missing" if job.step > 1 else "person image missing")
     if not storage.abs_path(product.image_path).is_file():
         raise LiveCallBlocked("product image missing")
     if settings.fashn_model != EXPECTED_MODEL:
         raise LiveCallBlocked(f"model must be {EXPECTED_MODEL}")
     if FIRST_TEST_CONFIG != {"resolution": "1k", "generation_mode": "balanced", "num_images": 1, "output_format": "png"}:
         raise LiveCallBlocked("request configuration differs from the authorized first-test configuration")
-    if credits_spent(db) > 0:
-        raise LiveCallBlocked("the live-call allowance has already been consumed")
+    # One more generation must still fit under the cap (default cap 2 == exactly one generation).
+    if credits_spent(db) + CREDITS_PER_GENERATION > settings.fashn_credit_cap:
+        raise LiveCallBlocked("the live-call allowance has already been consumed (credit cap reached)")
 
 
 def authorize_live_call(db: Session, job_id: int) -> None:

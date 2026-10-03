@@ -54,23 +54,46 @@ export function selectedList<T>(sel: Selection<T>): T[] {
   return Object.keys(sel).sort((a, b) => rank(a) - rank(b)).map((c) => sel[c]);
 }
 
-/**
- * The product that will actually be tried on. Current MVP limit: exactly ONE product per try-on.
- * With one item selected it is that item; with several, the user must mark one ("Try this one").
- */
-export function tryOnTarget<T extends Item>(sel: Selection<T>, targetKey: string | null): T | null {
-  const list = selectedList(sel);
-  if (list.length === 1) return list[0];
-  return list.find((p) => keyOf(p) === targetKey) ?? null;
+// Order items are applied in: base garments first, layers and accessories on top of the previous result.
+export const TRYON_ORDER = ["dresses", "tops", "bottoms", "outerwear", "shoes", "bags", "accessories", "other"];
+
+const tryRank = (c: string) => {
+  const i = TRYON_ORDER.indexOf(c);
+  return i === -1 ? TRYON_ORDER.length : i;
+};
+
+/** The selected products in the order they will be tried on, one generation each. */
+export function tryOnQueue<T extends Item>(sel: Selection<T>): T[] {
+  return Object.values(sel).sort((a, b) => tryRank(a.category) - tryRank(b.category));
 }
 
-export function tryOnReadiness(hasPerson: boolean, selectedCount: number, hasTarget: boolean): { ok: boolean; message: string } {
+export type CreditInfo = { per_generation: number; cap: number; spent: number };
+
+/**
+ * Can the queue run? Mock mode is free. In live mode every step is a paid FASHN generation, so the
+ * whole queue must fit in the remaining credit budget (otherwise it would stop half-way after paying),
+ * and the backend guard currently only allows eBay products.
+ */
+export function tryOnReadiness(
+  hasPerson: boolean,
+  queue: { retailer: string }[],
+  live: CreditInfo | null,
+): { ok: boolean; message: string } {
   if (!hasPerson) return { ok: false, message: "Upload your photo first." };
-  if (selectedCount === 0) return { ok: false, message: "Pick a product to try on." };
-  if (!hasTarget)
-    return {
-      ok: false,
-      message: `You picked ${selectedCount} items. Choose the ONE to try on now with “Try this one” — trying on all items together is coming soon.`,
-    };
+  if (queue.length === 0) return { ok: false, message: "Pick at least one product to try on." };
+  if (live) {
+    if (queue.some((p) => p.retailer !== "ebay"))
+      return { ok: false, message: "Live mode currently allows eBay products only. Remove the non-eBay items." };
+    const remaining = Math.max(0, live.cap - live.spent);
+    const allowed = Math.floor(remaining / live.per_generation);
+    if (queue.length > allowed)
+      return {
+        ok: false,
+        message:
+          allowed === 0
+            ? "The live credit budget is used up."
+            : `The live credit budget allows ${allowed} more generation${allowed === 1 ? "" : "s"} (${remaining} credits left) but you picked ${queue.length}. Remove items or raise the budget.`,
+      };
+  }
   return { ok: true, message: "" };
 }

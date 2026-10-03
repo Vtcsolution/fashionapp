@@ -503,7 +503,7 @@ def test_multi_item_search_survives_one_retailer_failing(monkeypatch):
 def test_try_on_still_accepts_exactly_one_product():
     from app.api.routes import TryOnRequest
 
-    assert set(TryOnRequest.model_fields) == {"product_id", "person_path"}  # no list of products
+    assert set(TryOnRequest.model_fields) == {"product_id", "person_path", "base_job_id"}  # one product per request
 
 
 # ---------- relevance: only products that match the prompt are shown ----------
@@ -554,3 +554,102 @@ def test_category_comes_from_the_searched_item_not_the_title(monkeypatch):
     monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay")])
     body = c.get("/api/products/search", params={"q": "silk scarf"}).json()
     assert [p["category"] for p in body["products"]] == ["accessories"]
+
+
+# ---------- multi-product: sequential chain, one generation per step ----------
+def seed_products(png, n, retailer="ebay"):
+    person_rel, _ = storage.save_bytes("persons", png(768, 1024, (180, 150, 130)), "png")
+    ids = []
+    with SessionLocal() as db:
+        for i in range(n):
+            rel, sha = storage.save_bytes("products", png(900, 1100, (20 * i + 30, 50, 80)), "png")
+            row = Product(retailer=retailer, retailer_product_id=str(i), name=f"Item {i}", product_url="u",
+                          source_image_url="i", image_path=rel, image_sha256=sha, image_width=900, image_height=1100)
+            db.add(row)
+            db.commit()
+            ids.append(row.id)
+    return person_rel, ids
+
+
+def post_step(person, pid, base=None):
+    return c.post("/api/tryon", json={"product_id": pid, "person_path": person, "base_job_id": base})
+
+
+def test_mock_chain_each_step_uses_previous_result(png):
+    person, ids = seed_products(png, 3)
+    jobs, base = [], None
+    for pid in ids:
+        r = post_step(person, pid, base)
+        assert r.status_code == 200
+        j = r.json()
+        assert j["status"] == "VERIFIED" and j["provider"] == "mock"
+        jobs.append(j)
+        base = j["id"]
+    assert [j["step"] for j in jobs] == [1, 2, 3]
+    assert [j["parent_job_id"] for j in jobs] == [None, jobs[0]["id"], jobs[1]["id"]]
+    assert jobs[0]["person_url"].startswith("/files/persons/")
+    # step 2's model image is exactly step 1's raw result, step 3's is step 2's
+    assert jobs[1]["person_url"] == jobs[0]["result"]["url"] and jobs[2]["person_url"] == jobs[1]["result"]["url"]
+    with SessionLocal() as db:
+        assert db.query(FashnLedger).count() == 0
+
+
+def test_chain_refuses_to_continue_after_a_failed_step(png):
+    person, ids = seed_products(png, 2)
+    first = post_step(person, ids[0]).json()
+    with SessionLocal() as db:
+        db.get(TryOnJob, first["id"]).status = "FAILED"
+        db.commit()
+    r = post_step(person, ids[1], first["id"])
+    assert r.status_code == 400 and "chain stopped" in r.json()["detail"]
+    assert post_step(person, ids[1], 9999).status_code == 400
+
+
+def test_live_chain_cap_two_allows_exactly_one_generation(png, monkeypatch):
+    live_env(monkeypatch)
+    fake = FakeFashn(png(1024, 1365, (10, 200, 10)))
+    fake_live(monkeypatch, fake)
+    person, ids = seed_products(png, 2)
+    j1 = post_step(person, ids[0]).json()
+    assert j1["status"] == "VERIFIED" and j1["provider"] == "fashn"
+    j2 = post_step(person, ids[1], j1["id"]).json()  # would be a 2nd paid generation
+    assert j2["status"] == "FAILED" and "allowance" in j2["error"]
+    assert len(fake.runs) == 1
+    with SessionLocal() as db:
+        assert db.query(FashnLedger).count() == 1
+
+
+def test_live_chain_with_raised_cap_sends_previous_result_as_model_image(png, monkeypatch):
+    live_env(monkeypatch)
+    monkeypatch.setattr(settings, "fashn_credit_cap", 6)  # operator-raised budget for 3 generations
+    outs = [png(1024, 1365, (10, 200, 10)), png(1024, 1365, (200, 10, 10)), png(1024, 1365, (10, 10, 200))]
+    fakes = [FakeFashn(o) for o in outs]
+    it = iter(fakes)
+    cur = {}
+
+    def next_client():
+        cur["f"] = next(it)
+        return cur["f"].client()
+
+    monkeypatch.setattr("app.services.tryon.get_client", next_client)
+    person, ids = seed_products(png, 3)
+    import base64
+
+    base, jobs = None, []
+    for pid in ids:
+        j = post_step(person, pid, base).json()
+        assert j["status"] == "VERIFIED", j["error"]
+        jobs.append(j)
+        base = j["id"]
+    assert [len(f.runs) for f in fakes] == [1, 1, 1]
+    for k in (1, 2):  # model_image of step k+1 == raw bytes of step k's result
+        body = json.loads(fakes[k].runs[0].content)
+        sent = base64.b64decode(body["inputs"]["model_image"].split(",", 1)[1])
+        assert sent == outs[k - 1]
+    with SessionLocal() as db:
+        assert db.query(FashnLedger).count() == 3 and sum(r.credits for r in db.query(FashnLedger)) == 6
+    assert c.get("/api/health").json()["credits"] == {"per_generation": 2, "cap": 6, "spent": 6}
+
+
+def test_health_reports_credit_budget():
+    assert c.get("/api/health").json()["credits"] == {"per_generation": 2, "cap": 2, "spent": 0}
