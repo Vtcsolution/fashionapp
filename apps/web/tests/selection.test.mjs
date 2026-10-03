@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness,
+  groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness, tryOnTarget,
 } from "../lib/selection.ts";
 
 const p = (retailer, id, category) => ({ retailer, product_id: id, category, name: `${category}-${id}` });
@@ -43,11 +43,26 @@ test("clicking the selected product again deselects it; removeCategory removes",
   assert.equal(Object.keys(s).length, 3); // original not mutated
 });
 
-test("try-on readiness enforces exactly one product (current MVP limit)", () => {
-  assert.equal(tryOnReadiness(false, 1).ok, false);
-  assert.equal(tryOnReadiness(true, 0).ok, false);
-  assert.equal(tryOnReadiness(true, 1).ok, true);
-  const multi = tryOnReadiness(true, 3);
+test("one selected item is the try-on target automatically", () => {
+  const s = toggleSelect({}, products[0]);
+  assert.equal(keyOf(tryOnTarget(s, null)), "ebay:1");
+});
+
+test("several selected items: no target until the user marks exactly one", () => {
+  let s = {};
+  for (const i of [0, 1, 3]) s = toggleSelect(s, products[i]);
+  assert.equal(tryOnTarget(s, null), null);
+  assert.equal(keyOf(tryOnTarget(s, "ebay:4")), "ebay:4");
+  assert.equal(tryOnTarget(s, "ebay:999"), null); // stale/removed target is ignored
+  assert.equal(tryOnTarget(removeCategory(s, "bags"), "ebay:4"), null); // removing the target clears it
+});
+
+test("try-on readiness: one person + exactly one chosen product", () => {
+  assert.equal(tryOnReadiness(false, 1, true).ok, false);
+  assert.equal(tryOnReadiness(true, 0, false).ok, false);
+  assert.equal(tryOnReadiness(true, 1, true).ok, true);
+  const multi = tryOnReadiness(true, 4, false);
   assert.equal(multi.ok, false);
-  assert.match(multi.message, /coming soon/);
+  assert.match(multi.message, /Try this one/);
+  assert.equal(tryOnReadiness(true, 4, true).ok, true); // 4 selected, 1 chosen -> only that one is sent
 });

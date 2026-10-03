@@ -54,15 +54,23 @@ export function selectedList<T>(sel: Selection<T>): T[] {
   return Object.keys(sel).sort((a, b) => rank(a) - rank(b)).map((c) => sel[c]);
 }
 
-/** Current MVP limit: exactly one person photo + exactly one product. */
-export function tryOnReadiness(hasPerson: boolean, selectedCount: number): { ok: boolean; message: string } {
+/**
+ * The product that will actually be tried on. Current MVP limit: exactly ONE product per try-on.
+ * With one item selected it is that item; with several, the user must mark one ("Try this one").
+ */
+export function tryOnTarget<T extends Item>(sel: Selection<T>, targetKey: string | null): T | null {
+  const list = selectedList(sel);
+  if (list.length === 1) return list[0];
+  return list.find((p) => keyOf(p) === targetKey) ?? null;
+}
+
+export function tryOnReadiness(hasPerson: boolean, selectedCount: number, hasTarget: boolean): { ok: boolean; message: string } {
   if (!hasPerson) return { ok: false, message: "Upload your photo first." };
   if (selectedCount === 0) return { ok: false, message: "Pick a product to try on." };
-  if (selectedCount > 1)
+  if (!hasTarget)
     return {
       ok: false,
-      message:
-        "Multi-item try-on is coming soon. For now TryOnU tries on one item at a time — remove items until one is left.",
+      message: `You picked ${selectedCount} items. Choose the ONE to try on now with “Try this one” — trying on all items together is coming soon.`,
     };
   return { ok: true, message: "" };
 }

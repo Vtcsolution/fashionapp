@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  CATEGORY_LABEL, groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness,
+  CATEGORY_LABEL, groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness, tryOnTarget,
   type Selection,
 } from "../lib/selection";
 
@@ -64,6 +64,7 @@ export default function Page() {
   const [retailerStatus, setRetailerStatus] = useState<Record<string, string>>({});
   const [hasSearched, setHasSearched] = useState(false);
   const [selection, setSelection] = useState<Selection<Product>>({});
+  const [targetKey, setTargetKey] = useState<string | null>(null); // the ONE item to try on when several are selected
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -76,7 +77,13 @@ export default function Page() {
 
   const groups = useMemo(() => groupByCategory(products), [products]);
   const picked = selectedList(selection);
-  const readiness = tryOnReadiness(!!personPath, picked.length);
+  const target = tryOnTarget(selection, targetKey);
+  const baseReadiness = tryOnReadiness(!!personPath, picked.length, !!target);
+  // The first live test is restricted to eBay products by the backend guard; say so before the click.
+  const nonEbayLive = mode === "live" && !!target && target.retailer !== "ebay";
+  const readiness = nonEbayLive
+    ? { ok: false, message: "The first live test needs an eBay product. Choose an eBay item to try on." }
+    : baseReadiness;
 
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const r = await fetch(`${API}${path}`, init);
@@ -130,8 +137,8 @@ export default function Page() {
   // One click = one request = at most one generation. Never retried here or in the backend.
   const tryOn = () =>
     guard(mode === "live" ? "Creating your try-on…" : "Creating a mock try-on…", async () => {
-      if (!readiness.ok || !personPath) return;
-      const chosen = picked[0];
+      if (!readiness.ok || !personPath || !target) return;
+      const chosen = target; // exactly one product is ever sent
       const sel = await call<{ id: number }>("/api/products/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -257,12 +264,20 @@ export default function Page() {
             <StepTitle n={4} title="Your selected items" hint={`${picked.length} selected`} />
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {picked.map((p) => (
-                <div key={keyOf(p)} className="flex gap-3 rounded-2xl border bg-white p-3 shadow-sm">
+                <div key={keyOf(p)} className={`flex gap-3 rounded-2xl border bg-white p-3 shadow-sm ${target && keyOf(target) === keyOf(p) && picked.length > 1 ? "border-fuchsia-600 ring-2 ring-fuchsia-500" : ""}`}>
                   <img src={p.image_url} alt={p.name} className="h-24 w-24 shrink-0 rounded-xl bg-gray-50 object-contain" />
                   <div className="min-w-0 flex-1 text-sm">
                     <p className="text-xs font-bold uppercase tracking-widest text-gray-400">{CATEGORY_LABEL[p.category] ?? p.category}</p>
                     <p className="line-clamp-2 font-medium leading-5">{p.name}</p>
                     <p className="font-semibold">{price(p)} <span className="font-normal text-gray-500">· {retailerName(p.retailer)}</span></p>
+                    {picked.length > 1 && (
+                      <button
+                        onClick={() => setTargetKey(keyOf(p))}
+                        className={`mt-1 rounded-lg px-2 py-1 text-xs font-semibold ${target && keyOf(target) === keyOf(p) ? "bg-fuchsia-600 text-white" : "border hover:bg-gray-50"}`}
+                      >
+                        {target && keyOf(target) === keyOf(p) ? "✓ Trying this one" : "Try this one"}
+                      </button>
+                    )}
                     <div className="mt-1 flex gap-3 text-xs">
                       <button className="text-violet-700 underline" onClick={() => scrollToCategory(p.category)}>Change</button>
                       <button className="text-red-700 underline" onClick={() => setSelection((s) => removeCategory(s, p.category))}>Remove</button>
@@ -284,7 +299,12 @@ export default function Page() {
             >
               TRYON U
             </button>
-            {!readiness.ok && <p className={`mx-auto mt-3 max-w-xl text-sm ${picked.length > 1 ? "rounded-lg bg-amber-50 p-3 text-amber-800" : "text-gray-500"}`}>{readiness.message}</p>}
+            {!readiness.ok && <p className={`mx-auto mt-3 max-w-xl text-sm ${picked.length > 1 || nonEbayLive ? "rounded-lg bg-amber-50 p-3 text-amber-800" : "text-gray-500"}`}>{readiness.message}</p>}
+            {readiness.ok && picked.length > 1 && target && (
+              <p className="mx-auto mt-3 max-w-xl text-sm text-gray-600">
+                Only <b>{target.name.slice(0, 60)}</b> will be tried on. Your other {picked.length - 1} picks stay saved for the multi-item version.
+              </p>
+            )}
           </section>
         )}
 
