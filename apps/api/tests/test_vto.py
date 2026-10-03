@@ -251,11 +251,21 @@ def test_authorization_in_dotenv_settings_is_not_honored():
     assert not hasattr(settings, "fashn_live_authorization") and not hasattr(settings, "fashn_live_enabled")
 
 
-def test_preflight_requires_ebay_product(png, monkeypatch):
+@pytest.mark.parametrize("retailer", ["ebay", "aliexpress"])
+def test_preflight_allows_both_active_retailers(png, monkeypatch, retailer):
     live_env(monkeypatch)
-    jid = seed(png, retailer="aliexpress")
+    jid = seed(png, retailer=retailer)
     with SessionLocal() as db:
-        with pytest.raises(LiveCallBlocked, match="eBay"):
+        preflight_live(db, db.get(TryOnJob, jid), db.get(Product, 1))  # no exception, no side effects
+        assert db.query(FashnLedger).count() == 0
+
+
+@pytest.mark.parametrize("retailer", ["cj", "rakuten", "somewhere-else"])
+def test_preflight_blocks_disabled_retailers(png, monkeypatch, retailer):
+    live_env(monkeypatch)
+    jid = seed(png, retailer=retailer)
+    with SessionLocal() as db:
+        with pytest.raises(LiveCallBlocked, match="not enabled for live"):
             preflight_live(db, db.get(TryOnJob, jid), db.get(Product, 1))
 
 

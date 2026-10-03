@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -22,8 +22,14 @@ class Product(Base):
     affiliate_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(32), default="other")
     source_image_url: Mapped[str] = mapped_column(Text)  # exact URL we downloaded
-    image_path: Mapped[str] = mapped_column(Text)  # exact bytes we will send
-    image_sha256: Mapped[str] = mapped_column(String(64))
+    image_path: Mapped[str] = mapped_column(Text)  # exact bytes we send to FASHN (PNG if the source was WebP)
+    image_sha256: Mapped[str] = mapped_column(String(64))  # hash of the SENT file
+    # The retailer file as downloaded, kept untouched. Same as the sent file unless a lossless conversion happened.
+    original_image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    original_format: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    sent_format: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    image_converted: Mapped[bool] = mapped_column(Boolean, default=False)
     image_width: Mapped[int] = mapped_column(Integer)
     image_height: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

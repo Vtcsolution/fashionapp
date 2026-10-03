@@ -70,6 +70,15 @@ def vision_models_configured() -> bool:
     return bool(settings.openai_api_key and settings.gemini_api_key)
 
 
+def live_verification_ready() -> bool:
+    """A live (paid) generation is only allowed when it will be really verified by both vision models."""
+    return settings.verification_mode != "placeholder" and vision_models_configured()
+
+
+LIVE_VERIFICATION_MESSAGE = ("A live run requires real OpenAI + Gemini verification (both API keys, verification "
+                             "enabled). Nothing was started.")
+
+
 def get_verifier(provider: str):
     """auto: real OpenAI+Gemini vision for real FASHN output, placeholder for mock output."""
     from .llm import LlmVerifier  # local import: llm.py imports this module

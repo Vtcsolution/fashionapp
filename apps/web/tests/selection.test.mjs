@@ -68,5 +68,7 @@ test("readiness (live): whole queue must fit the credit budget and be eBay-only"
   assert.match(tooMany.message, /allows 1 more generation /);
   assert.equal(tryOnReadiness(true, ebay(3), credits(0, 6)).ok, true);
   assert.match(tryOnReadiness(true, ebay(1), credits(2, 2)).message, /used up/);
-  assert.match(tryOnReadiness(true, [{ retailer: "aliexpress" }], credits(0, 6)).message, /eBay products only/);
+  assert.equal(tryOnReadiness(true, [{ retailer: "aliexpress" }], credits(0, 6)).ok, true); // AliExpress is allowed live
+  assert.equal(tryOnReadiness(true, [{ retailer: "ebay" }, { retailer: "aliexpress" }], credits(0, 6)).ok, true);
+  assert.match(tryOnReadiness(true, [{ retailer: "cj" }], credits(0, 6)).message, /eBay and AliExpress/); // CJ/Rakuten stay off
 });

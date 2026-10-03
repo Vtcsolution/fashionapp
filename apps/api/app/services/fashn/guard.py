@@ -10,6 +10,8 @@ from .builder import CREDITS_PER_GENERATION, FIRST_TEST_CONFIG
 
 AUTH_PHRASE = "RUN THE 2-CREDIT FASHN TEST"
 EXPECTED_MODEL = "tryon-max"
+# Retailers whose products may be tried on live: the two active product sources. CJ/Rakuten stay disabled.
+LIVE_RETAILERS = ("ebay", "aliexpress")
 
 
 class LiveCallBlocked(Exception):
@@ -42,12 +44,16 @@ def preflight_live(db: Session, job: TryOnJob, product: Product) -> None:
         raise LiveCallBlocked("missing explicit FASHN_LIVE_AUTHORIZATION phrase")
     if not settings.fashn_api_key:
         raise LiveCallBlocked("FASHN_API_KEY not configured")
-    if product.retailer != "ebay":
-        raise LiveCallBlocked("the first live test must use an eBay product")
+    if product.retailer not in LIVE_RETAILERS:
+        raise LiveCallBlocked(f"retailer '{product.retailer}' is not enabled for live try-on")
+    if product.image_path.rsplit(".", 1)[-1] not in ("jpg", "png"):  # FASHN is documented for JPEG/PNG only
+        raise LiveCallBlocked("product image must be JPEG or PNG (convert WebP losslessly first)")
     # Step 1 starts from the uploaded person; later steps start from the previous step's raw result.
     allowed_base = ("persons/",) if job.step <= 1 else ("results/",)
     if not job.person_image_path.startswith(allowed_base) or not storage.abs_path(job.person_image_path).is_file():
         raise LiveCallBlocked("base image missing" if job.step > 1 else "person image missing")
+    if job.person_image_path.rsplit(".", 1)[-1] not in ("jpg", "png"):
+        raise LiveCallBlocked("model image must be JPEG or PNG")
     if not storage.abs_path(product.image_path).is_file():
         raise LiveCallBlocked("product image missing")
     if settings.fashn_model != EXPECTED_MODEL:

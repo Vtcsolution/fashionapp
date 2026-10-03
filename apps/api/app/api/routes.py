@@ -8,8 +8,9 @@ from ..config import settings
 from ..db import get_db
 from ..models import Product, TryOnJob, TryOnResult
 from ..services.fashn.builder import CREDITS_PER_GENERATION
-from ..services.fashn.guard import credits_spent, vto_mode
-from ..services.images import ImageRejected, download_best_image, validate_image_bytes
+from ..services.fashn.guard import credits_spent, live_enabled, vto_mode
+from ..services.verification.base import LIVE_VERIFICATION_MESSAGE, live_verification_ready
+from ..services.images import ImageRejected, download_best_image, prepare_for_fashn, validate_image_bytes
 from ..services.prompt_parser import parse_items
 from ..services.retailers.aggregator import ACTIVE, parse_query, search_all
 from ..services.retailers.base import RetailerProduct
@@ -49,8 +50,14 @@ async def upload_person(file: UploadFile = File(...)):
         _, _, ext = validate_image_bytes(data, min_side=256)
     except ImageRejected as e:
         raise HTTPException(400, str(e))
-    rel, digest = storage.save_bytes("persons", data, ext)  # stored untouched
-    return {"person_path": rel, "sha256": digest, "url": f"/files/{rel}"}
+    try:
+        prep = prepare_for_fashn(data, ext)  # same rule as products: only JPEG/PNG go to FASHN as-is
+    except ImageRejected as e:
+        raise HTTPException(400, str(e))
+    orig_rel, orig_digest = storage.save_bytes("originals", prep.original_bytes, prep.original_ext)  # untouched
+    rel, digest = storage.save_bytes("persons", prep.sent_bytes, prep.sent_ext)
+    return {"person_path": rel, "sha256": digest, "url": f"/files/{rel}", "original_sha256": orig_digest,
+            "original_format": prep.original_ext, "converted": prep.converted}
 
 
 @router.post("/products/select")
@@ -61,14 +68,24 @@ async def select_product(p: RetailerProduct, db: Session = Depends(get_db)):
         url, data, w, h, ext = await download_best_image(candidates)
     except ImageRejected as e:
         raise HTTPException(422, str(e))
-    rel, digest = storage.save_bytes("products", data, ext)
+    try:
+        prep = prepare_for_fashn(data, ext)  # JPEG/PNG untouched; WebP etc. -> verified-lossless PNG
+    except ImageRejected as e:
+        raise HTTPException(422, str(e))
+    orig_rel, orig_digest = storage.save_bytes("originals", prep.original_bytes, prep.original_ext)  # never modified
+    rel, digest = storage.save_bytes("products", prep.sent_bytes, prep.sent_ext)  # the file FASHN will receive
     row = Product(
         retailer=p.retailer, retailer_product_id=p.product_id, name=p.name, price=p.price, currency=p.currency,
-        product_url=p.url, affiliate_url=p.affiliate_url, category=p.category, source_image_url=url, image_path=rel, image_sha256=digest, image_width=w, image_height=h,
+        product_url=p.url, affiliate_url=p.affiliate_url, category=p.category, source_image_url=url,
+        image_path=rel, image_sha256=digest, image_width=w, image_height=h,
+        original_image_path=orig_rel, original_image_sha256=orig_digest, original_format=prep.original_ext,
+        sent_format=prep.sent_ext, image_converted=prep.converted,
     )
     db.add(row)
     db.commit()
-    return {"id": row.id, "image_url": f"/files/{rel}", "width": w, "height": h, "sha256": digest}
+    return {"id": row.id, "image_url": f"/files/{rel}", "width": w, "height": h, "sha256": digest,
+            "original_sha256": orig_digest, "original_format": prep.original_ext, "sent_format": prep.sent_ext,
+            "converted": prep.converted}
 
 
 class TryOnRequest(BaseModel):
@@ -89,7 +106,10 @@ def _job_view(db: Session, job: TryOnJob):
         "product": {"id": prod.id, "retailer_product_id": prod.retailer_product_id, "category": prod.category,
                     "name": prod.name, "price": prod.price, "currency": prod.currency,
                     "retailer": prod.retailer, "url": prod.product_url, "affiliate_url": prod.affiliate_url,
-                    "image_url": f"/files/{prod.image_path}", "source_image_url": prod.source_image_url},
+                    "image_url": f"/files/{prod.image_path}", "source_image_url": prod.source_image_url,
+                    "image_sha256": prod.image_sha256, "original_image_sha256": prod.original_image_sha256,
+                    "original_format": prod.original_format, "sent_format": prod.sent_format,
+                    "image_converted": bool(prod.image_converted)},
         "result": res and {
             "url": f"/files/{res.result_path}",
             "verification": {"overall": res.verification_overall, **json.loads(res.verification_json)},
@@ -99,6 +119,8 @@ def _job_view(db: Session, job: TryOnJob):
 
 @router.post("/tryon")
 async def create_tryon(req: TryOnRequest, db: Session = Depends(get_db)):
+    if live_enabled() and not live_verification_ready():  # a paid generation must be really verified
+        raise HTTPException(400, LIVE_VERIFICATION_MESSAGE)
     prod = db.get(Product, req.product_id)
     if not prod:
         raise HTTPException(404, "product not selected")

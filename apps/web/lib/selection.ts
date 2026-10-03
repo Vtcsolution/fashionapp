@@ -67,12 +67,15 @@ export function tryOnQueue<T extends Item>(sel: Selection<T>): T[] {
   return Object.values(sel).sort((a, b) => tryRank(a.category) - tryRank(b.category));
 }
 
-export type CreditInfo = { per_generation: number; cap: number; spent: number };
+// Mirrors the backend guard (LIVE_RETAILERS): the two active product sources.
+export const LIVE_RETAILERS = ["ebay", "aliexpress"];
+
+export type CreditInfo ={ per_generation: number; cap: number; spent: number };
 
 /**
  * Can the queue run? Mock mode is free. In live mode every step is a paid FASHN generation, so the
  * whole queue must fit in the remaining credit budget (otherwise it would stop half-way after paying),
- * and the backend guard currently only allows eBay products.
+ * and the backend guard allows eBay and AliExpress products.
  */
 export function tryOnReadiness(
   hasPerson: boolean,
@@ -82,8 +85,8 @@ export function tryOnReadiness(
   if (!hasPerson) return { ok: false, message: "Upload your photo first." };
   if (queue.length === 0) return { ok: false, message: "Pick at least one product to try on." };
   if (live) {
-    if (queue.some((p) => p.retailer !== "ebay"))
-      return { ok: false, message: "Live mode currently allows eBay products only. Remove the non-eBay items." };
+    if (queue.some((p) => !LIVE_RETAILERS.includes(p.retailer)))
+      return { ok: false, message: "Live try-on supports eBay and AliExpress products. Remove the other items." };
     const remaining = Math.max(0, live.cap - live.spent);
     const allowed = Math.floor(remaining / live.per_generation);
     if (queue.length > allowed)

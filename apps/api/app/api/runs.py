@@ -28,7 +28,9 @@ from ..services.fashn.builder import CREDITS_PER_GENERATION
 from ..services.fashn.guard import credits_spent, live_enabled, vto_mode
 from ..services.storage import local as storage
 from ..services.tryon import ACCEPTED, run_job
-from ..services.verification.base import FinalContext, get_verifier, vision_models_configured
+from ..services.verification.base import (
+    LIVE_VERIFICATION_MESSAGE, FinalContext, get_verifier, live_verification_ready,
+)
 from .routes import _job_view
 
 router = APIRouter(prefix="/api")
@@ -117,9 +119,8 @@ def create_run(req: RunRequest, db: Session = Depends(get_db)):
         raise HTTPException(404, "a selected product was not found")
     if live_enabled():
         # A real run must be really verified: both vision models are required, and verification cannot be disabled.
-        if settings.verification_mode == "placeholder" or not vision_models_configured():
-            raise HTTPException(400, "A live run requires real OpenAI + Gemini verification (both API keys, "
-                                     "verification enabled). Nothing was started.")
+        if not live_verification_ready():
+            raise HTTPException(400, LIVE_VERIFICATION_MESSAGE)
         # never start a paid chain that cannot finish under the credit budget
         need = len(products) * CREDITS_PER_GENERATION
         left = settings.fashn_credit_cap - credits_spent(db)
