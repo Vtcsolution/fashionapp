@@ -7,6 +7,8 @@ from ...config import settings
 CHECKS = ("product_presence", "product_correspondence", "color", "details", "placement", "identity_preserved")
 # From step 2 on we also check that nothing from earlier steps disappeared, duplicated or changed color.
 EXTRA_CHECKS = ("earlier_items_preserved",)
+# A PASS needs BOTH of these to have actually analysed the images. One model alone can never confirm anything.
+REQUIRED_MODELS = ("openai", "gemini")
 
 
 def checks_for_step(step: int) -> tuple[str, ...]:
@@ -25,11 +27,21 @@ class VerifyContext:
 
 
 @dataclass
+class FinalContext:
+    """Whole-look check: the FINAL image against EVERY selected product and the original photo."""
+
+    original: bytes
+    result: bytes
+    products: list[tuple[str, str, bytes]]  # (name, category, retailer image) in application order
+
+
+@dataclass
 class Verification:
     checks: dict[str, str]
     overall: str = "REVIEW_REQUIRED"
     notes: str = ""
     models: dict = field(default_factory=dict)  # per-model raw verdicts + reasons, for the audit trail
+    performed_by: list[str] = field(default_factory=list)  # models that really analysed the images; [] = nobody
 
 
 def decide_overall(checks: dict[str, str]) -> str:
@@ -47,8 +59,15 @@ class PlaceholderVerifier:
 
     async def verify(self, ctx: VerifyContext) -> Verification:
         checks = {c: "NOT_CHECKED" for c in checks_for_step(ctx.step)}
-        return Verification(checks, decide_overall(checks),
-                            "No automated visual verification ran (mock result). A human must review it.")
+        return Verification(checks, "REVIEW_REQUIRED",
+                            "NOT VERIFIED: no visual analysis was performed (mock/demo result).", {}, [])
+
+    async def verify_final(self, ctx: FinalContext) -> dict | None:
+        return None  # nothing was analysed, so there is no final verification to report
+
+
+def vision_models_configured() -> bool:
+    return bool(settings.openai_api_key and settings.gemini_api_key)
 
 
 def get_verifier(provider: str):

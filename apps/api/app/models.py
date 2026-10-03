@@ -40,7 +40,10 @@ class TryOnRun(Base):
     __tablename__ = "tryon_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
     person_image_path: Mapped[str] = mapped_column(Text)
+    # PLANNED -> RUNNING -> FINISHED (every step generated) | STOPPED (a step failed or was rejected).
+    # FINISHED says nothing about quality: that is final_verification_json (real vision check of the final image).
     status: Mapped[str] = mapped_column(String(16), default="PLANNED")
+    final_verification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -50,7 +53,11 @@ class TryOnJob(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # set when part of a multi-product run
     # Step N uses the raw result of step N-1 (parent_job_id) as its base image; step 1 uses the uploaded person.
-    # Job states: PLANNED -> SELECTED -> SENT -> GENERATED -> VERIFIED | FAILED | SKIPPED
+    # Job states: PLANNED -> SELECTED -> SENT -> GENERATED (an image exists; NOT yet checked) ->
+    #   VERIFIED         OpenAI AND Gemini both analysed it and passed every check (the only "verified")
+    #   REVIEW_REQUIRED  generated, but not confirmed (uncertain, model outage, or mock/no verification)
+    #   REJECTED         a vision model clearly found a problem; the raw image is kept, the run stops
+    #   FAILED | SKIPPED
     step: Mapped[int] = mapped_column(Integer, default=1)
     parent_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     person_image_path: Mapped[str] = mapped_column(Text)  # base image sent as model_image

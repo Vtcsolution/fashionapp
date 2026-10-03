@@ -14,7 +14,7 @@ from ..services.prompt_parser import parse_items
 from ..services.retailers.aggregator import ACTIVE, parse_query, search_all
 from ..services.retailers.base import RetailerProduct
 from ..services.storage import local as storage
-from ..services.tryon import run_job
+from ..services.tryon import ACCEPTED, run_job
 
 router = APIRouter(prefix="/api")
 MAX_PERSON_BYTES = 15 * 1024 * 1024
@@ -83,7 +83,8 @@ def _job_view(db: Session, job: TryOnJob):
     res = db.query(TryOnResult).filter_by(job_id=job.id).first()
     prod = db.get(Product, job.product_id)
     return {
-        "id": job.id, "step": job.step, "parent_job_id": job.parent_job_id, "status": job.status, "provider": job.provider, "error": job.error,
+        "id": job.id, "step": job.step, "parent_job_id": job.parent_job_id, "status": job.status,
+        "fashn_prediction_id": job.fashn_job_id, "simulated": job.provider == "mock", "provider": job.provider, "error": job.error,
         "person_url": f"/files/{job.person_image_path}",
         "product": {"id": prod.id, "retailer_product_id": prod.retailer_product_id, "category": prod.category,
                     "name": prod.name, "price": prod.price, "currency": prod.currency,
@@ -108,7 +109,7 @@ async def create_tryon(req: TryOnRequest, db: Session = Depends(get_db)):
     if req.base_job_id is not None:  # chained step: the previous raw result becomes the model image
         parent = db.get(TryOnJob, req.base_job_id)
         pres = parent and db.query(TryOnResult).filter_by(job_id=parent.id).first()
-        if not parent or parent.status != "VERIFIED" or not pres:
+        if not parent or parent.status not in ACCEPTED or not pres:
             raise HTTPException(400, "the previous step did not finish successfully; chain stopped")
         base_path, step, parent_id = pres.result_path, parent.step + 1, parent.id
     job = TryOnJob(

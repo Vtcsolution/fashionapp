@@ -12,6 +12,9 @@ from .verification.base import VerifyContext, get_verifier
 
 log = logging.getLogger(__name__)
 
+# Statuses that mean "an image was generated and the run may continue".
+ACCEPTED = ("VERIFIED", "REVIEW_REQUIRED")
+
 
 def _ext(rel: str) -> str:
     return rel.rsplit(".", 1)[-1]
@@ -29,11 +32,15 @@ def original_person_path(db: Session, job: TryOnJob) -> str:
 
 
 async def run_job(job_id: int, client=None) -> None:
-    """PLANNED/SELECTED -> SENT -> GENERATED -> VERIFIED | REJECTED | FAILED.
+    """PLANNED/SELECTED -> SENT -> GENERATED -> VERIFIED | REVIEW_REQUIRED | REJECTED, or FAILED.
 
-    Exactly one FASHN generation per job. Any failure ends the job as FAILED and a clear verification FAIL ends
-    it as REJECTED (the raw result is still saved and shown); nothing is retried, and a failed live job never
-    falls back to another provider or to mock. Awaited inline by the request handler (never in the background).
+    Exactly one FASHN generation per job.
+      VERIFIED         only when OpenAI AND Gemini both analysed the images and every check passed
+      REVIEW_REQUIRED  an image exists but nothing confirmed it (uncertain, outage, mock): the run may continue
+      REJECTED         a model clearly found a problem: the raw result is kept and shown, the run stops
+      FAILED           an error (FASHN, storage, ...): nothing is retried, and a failed live job never falls back
+                       to another provider or to mock
+    Awaited inline by the request handler (never in the background).
     """
     with SessionLocal() as db:
         job = db.get(TryOnJob, job_id)
@@ -57,7 +64,7 @@ async def run_job(job_id: int, client=None) -> None:
             res = await client.try_on(base, _ext(job.person_image_path), prod_bytes, _ext(product.image_path),
                                       on_prediction_id=remember_prediction)
             rel, digest = storage.save_bytes("results", res.image_bytes, "png")  # raw output, untouched
-            job.status = "GENERATED"
+            job.status = "GENERATED"  # an image exists; it has NOT been checked yet
             db.commit()
 
             ctx = VerifyContext(
@@ -68,13 +75,16 @@ async def run_job(job_id: int, client=None) -> None:
             v = await get_verifier(client.provider).verify(ctx)
             db.add(TryOnResult(
                 job_id=job.id, result_path=rel, result_sha256=digest, verification_overall=v.overall,
-                verification_json=json.dumps({"checks": v.checks, "notes": v.notes, "models": v.models}),
+                verification_json=json.dumps({"checks": v.checks, "notes": v.notes, "models": v.models,
+                                              "performed_by": v.performed_by}),
             ))
             if v.overall == "FAIL":
                 job.status = "REJECTED"
                 job.error = f"verification failed: {v.notes[:250]}"
-            else:
+            elif v.overall == "PASS" and v.performed_by:
                 job.status = "VERIFIED"
+            else:
+                job.status = "REVIEW_REQUIRED"
             db.commit()
         except Exception as e:  # terminal: report clearly, never retry
             log.warning("job %s failed: %s", job_id, type(e).__name__)

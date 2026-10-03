@@ -258,14 +258,17 @@ def test_mock_orchestration_for_one_to_six_products(png, n):
     assert run["total_steps"] == n and [s["status"] for s in run["steps"]] == ["PLANNED"] * n
     for _ in range(n):
         run = c.post(f"/api/tryon/run/{run['id']}/next").json()
-    assert run["status"] == "COMPLETE" and run["summary"].startswith(f"{n} of {n}")
+    assert run["status"] == "FINISHED" and run["simulated"] is True and run["final_status"] == "SIMULATED"
+    assert run["summary"].startswith("MOCK / DEMO") and run["final_verification"] is None
     st = run["steps"]
     assert [s["product"]["id"] for s in st] == ids  # exact products, exact order, none dropped or substituted
     assert [s["product"]["retailer_product_id"] for s in st] == [f"R-{i}-{CAT6[i]}" for i in range(n)]
     assert [s["product"]["affiliate_url"] for s in st] == [f"https://aff/{i}" for i in range(n)]
     assert [s["product"]["url"] for s in st] == [f"https://shop/{i}" for i in range(n)]
     assert all(s["product"]["image_url"].startswith("/files/products/") for s in st)
-    assert all(s["status"] == "VERIFIED" and s["result"] for s in st)
+    assert all(s["status"] == "REVIEW_REQUIRED" and s["result"] for s in st)  # generated, never "VERIFIED" in mock
+    assert all(s["product_presence"] == "SIMULATED" and s["simulated"] for s in st)
+    assert len({s["result"]["url"] for s in st}) == n  # every mock step looks different (no reused image)
     for k in range(1, n):
         assert st[k]["person_url"] == st[k - 1]["result"]["url"]
     assert run["final_url"] == st[-1]["result"]["url"]
@@ -305,9 +308,9 @@ def test_verification_fail_stops_the_sequence_and_skips_the_rest(png, monkeypatc
         async def verify(self, ctx):
             checks = {k: "PASS" for k in checks_for_step(ctx.step)}
             if ctx.step != 3:
-                return Verification(checks, "PASS", "")
+                return Verification(checks, "PASS", "", {}, ["gemini", "openai"])
             checks["product_presence"] = "FAIL"
-            return Verification(checks, "FAIL", "product_presence [gemini FAIL]: no sandals visible")
+            return Verification(checks, "FAIL", "product_presence [gemini FAIL]: no sandals visible", {}, ["gemini", "openai"])
 
     monkeypatch.setattr("app.services.tryon.get_verifier", lambda provider: FailAtThree())
     person, ids = seed_n(png, 5)
@@ -315,26 +318,36 @@ def test_verification_fail_stops_the_sequence_and_skips_the_rest(png, monkeypatc
     for _ in range(3):
         run = c.post(f"/api/tryon/run/{run['id']}/next").json()
     assert [s["status"] for s in run["steps"]] == ["VERIFIED", "VERIFIED", "REJECTED", "SKIPPED", "SKIPPED"]
-    assert run["status"] == "FAILED" and "no sandals visible" in run["steps"][2]["error"]
+    assert run["status"] == "STOPPED" and "no sandals visible" in run["steps"][2]["error"]
     assert run["steps"][2]["result"] is not None  # the rejected raw image is still available to inspect
-    assert run["steps"][2]["product_presence"] == "ABSENT"
+    assert run["final_status"] == "SIMULATED"  # mock provider: never a real claim, whatever a stub verifier says
     assert run["final_url"] == run["steps"][1]["result"]["url"]  # last ACCEPTED image, not the rejected one
-    assert run["summary"].startswith("2 of 5")
     assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # stopped: no silent continuation
 
 
-def test_review_required_continues_but_is_never_called_present(png, monkeypatch):
+def test_unverified_steps_continue_but_are_never_called_verified(png, monkeypatch):
     class Unsure:
         async def verify(self, ctx):
-            return Verification({k: "REVIEW_REQUIRED" for k in checks_for_step(ctx.step)}, "REVIEW_REQUIRED", "uncertain")
+            return Verification({k: "REVIEW_REQUIRED" for k in checks_for_step(ctx.step)}, "REVIEW_REQUIRED", "uncertain",
+                                {}, ["gemini", "openai"])
 
     monkeypatch.setattr("app.services.tryon.get_verifier", lambda provider: Unsure())
     person, ids = seed_n(png, 3)
     run = make_run(person, ids)
     for _ in range(3):
         run = c.post(f"/api/tryon/run/{run['id']}/next").json()
-    assert run["status"] == "COMPLETE" and [s["product_presence"] for s in run["steps"]] == ["REVIEW_REQUIRED"] * 3
-    assert "manual review required" in run["summary"]
+    assert run["status"] == "FINISHED" and [s["status"] for s in run["steps"]] == ["REVIEW_REQUIRED"] * 3
+
+
+def test_no_analysis_means_no_verified_even_if_the_verdict_says_pass(png, monkeypatch):
+    class Liar:  # claims PASS but no model actually analysed anything
+        async def verify(self, ctx):
+            return Verification({k: "PASS" for k in checks_for_step(ctx.step)}, "PASS", "", {}, [])
+
+    monkeypatch.setattr("app.services.tryon.get_verifier", lambda provider: Liar())
+    person, ids = seed_n(png, 1)
+    run = c.post(f"/api/tryon/run/{make_run(person, ids)['id']}/next").json()
+    assert run["steps"][0]["status"] == "REVIEW_REQUIRED"
 
 
 def test_multi_product_live_is_still_capped_at_two_credits(png, monkeypatch):

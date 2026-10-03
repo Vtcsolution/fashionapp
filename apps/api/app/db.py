@@ -28,7 +28,8 @@ def _add_missing_columns():
     """Tiny in-place migration for the dev SQLite DB, so existing rows (e.g. the credit ledger) are kept."""
     from sqlalchemy import inspect, text
 
-    wanted = {"products": {"category": "VARCHAR(32) DEFAULT 'other'"}, "tryon_jobs": {"run_id": "INTEGER"}}
+    wanted = {"products": {"category": "VARCHAR(32) DEFAULT 'other'"}, "tryon_jobs": {"run_id": "INTEGER"},
+              "tryon_runs": {"final_verification_json": "TEXT"}}
     insp = inspect(engine)
     with engine.begin() as conn:
         for table, cols in wanted.items():

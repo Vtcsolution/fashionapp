@@ -42,10 +42,30 @@ def seed(png, retailer="ebay"):
         return j.id
 
 
-def live_env(monkeypatch):
+class PassBoth:
+    """Stand-in for a real OpenAI+Gemini verification that analysed the images and passed everything."""
+
+    async def verify(self, ctx):
+        from app.services.verification.base import Verification, checks_for_step
+
+        return Verification({k: "PASS" for k in checks_for_step(ctx.step)}, "PASS", "", {}, ["gemini", "openai"])
+
+    async def verify_final(self, ctx):
+        return {"overall": "PASS", "identity_preserved": "PASS", "notes": "", "models": {},
+                "performed_by": ["gemini", "openai"],
+                "items": [{"index": i + 1, "name": n, "category": cat, "present": "PASS", "matches": "PASS"}
+                          for i, (n, cat, _) in enumerate(ctx.products)]}
+
+
+def live_env(monkeypatch, verifier=PassBoth):
+    """Arm live FASHN for one test: env flags, a fake key, vision keys, and a verifier (default: passes both)."""
     monkeypatch.setenv("FASHN_LIVE_ENABLED", "true")
     monkeypatch.setenv("FASHN_LIVE_AUTHORIZATION", AUTH_PHRASE)
     monkeypatch.setattr(settings, "fashn_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test-not-real")  # a live run requires both vision keys
+    monkeypatch.setattr(settings, "gemini_api_key", "gk-test-not-real")
+    monkeypatch.setattr("app.services.tryon.get_verifier", lambda provider: verifier())
+    monkeypatch.setattr("app.api.runs.get_verifier", lambda provider: verifier())
 
 
 class FakeFashn:
@@ -173,7 +193,7 @@ def test_full_mock_flow_end_to_end(png, monkeypatch):
         "retailer": "ebay", "product_id": "1", "name": "Blue dress", "price": "10", "currency": "USD",
         "url": "https://shop/x", "affiliate_url": "https://aff/x", "image_url": "https://img/a.png"}).json()
     job = c.post("/api/tryon", json={"product_id": sel["id"], "person_path": up["person_path"]}).json()  # inline
-    assert job["status"] == "VERIFIED" and job["provider"] == "mock"
+    assert job["status"] == "REVIEW_REQUIRED" and job["provider"] == "mock" and job["simulated"] is True  # never VERIFIED
     assert job["product"]["affiliate_url"] == "https://aff/x"
     v = job["result"]["verification"]
     assert v["overall"] == "REVIEW_REQUIRED" and set(v["checks"]) == set(CHECKS)
@@ -270,7 +290,8 @@ def test_live_success_one_call_raw_bytes_and_second_job_blocked(png, monkeypatch
         assert job.status == "VERIFIED" and job.provider == "fashn" and job.fashn_job_id == "pred-1"
         assert storage.read_bytes(res.result_path) == out  # raw FASHN bytes, byte-for-byte
         assert db.query(FashnLedger).one().credits == 2
-        assert json.loads(res.verification_json)["checks"]["identity_preserved"] == "NOT_CHECKED"
+        stored = json.loads(res.verification_json)
+        assert stored["checks"]["identity_preserved"] == "PASS" and stored["performed_by"] == ["gemini", "openai"]
     assert len(fake.runs) == 1
     body = json.loads(fake.runs[0].content)
     assert body["model_name"] == "tryon-max" and body["inputs"]["resolution"] == "1k"
@@ -586,7 +607,7 @@ def test_mock_chain_each_step_uses_previous_result(png):
         r = post_step(person, pid, base)
         assert r.status_code == 200
         j = r.json()
-        assert j["status"] == "VERIFIED" and j["provider"] == "mock"
+        assert j["status"] == "REVIEW_REQUIRED" and j["provider"] == "mock"  # generated, not verified
         jobs.append(j)
         base = j["id"]
     assert [j["step"] for j in jobs] == [1, 2, 3]
@@ -688,7 +709,7 @@ def test_run_plan_is_stored_before_anything_runs(png):
     assert [s["status"] for s in run["steps"]] == ["PLANNED"] * 4
     assert [s["product"]["id"] for s in run["steps"]] == ids  # the exact selected products, in order
     assert [s["step"] for s in run["steps"]] == [1, 2, 3, 4]
-    assert [s["product_presence"] for s in run["steps"]] == ["NOT_GENERATED"] * 4
+    assert [s["product_presence"] for s in run["steps"]] == ["SIMULATED"] * 4  # mock plan: nothing is claimed
     with SessionLocal() as db:
         assert db.query(FashnLedger).count() == 0
 
@@ -701,8 +722,8 @@ def test_four_product_mock_run_tracks_every_product_through_every_step(png):
         v = c.post(f"/api/tryon/run/{run['id']}/next").json()
         views.append(v)
         done = [s["status"] for s in v["steps"]]
-        assert done == ["VERIFIED"] * (i + 1) + ["PLANNED"] * (3 - i)  # exactly one step per call
-        assert v["status"] == ("COMPLETE" if i == 3 else "RUNNING")
+        assert done == ["REVIEW_REQUIRED"] * (i + 1) + ["PLANNED"] * (3 - i)  # exactly one step per call
+        assert v["status"] == ("FINISHED" if i == 3 else "RUNNING")
     final = views[-1]
     # every selected product is still there, unchanged, in order, with its identity fields
     assert [(s["step"], s["product"]["id"], s["product"]["category"], s["product"]["retailer_product_id"],
@@ -715,12 +736,17 @@ def test_four_product_mock_run_tracks_every_product_through_every_step(png):
         assert final["steps"][k]["person_url"] == final["steps"][k - 1]["result"]["url"]
         assert final["steps"][k]["parent_job_id"] == final["steps"][k - 1]["id"]
     assert final["final_url"] == final["steps"][3]["result"]["url"]
-    # honesty: nothing is claimed as verified
-    assert [s["product_presence"] for s in final["steps"]] == ["REVIEW_REQUIRED"] * 4
+    # honesty: a mock run is SIMULATED, never verified, never "applied", and never claims a product is present
+    assert final["simulated"] is True and final["final_status"] == "SIMULATED" and final["final_verification"] is None
+    assert [s["product_presence"] for s in final["steps"]] == ["SIMULATED"] * 4
     assert all(s["result"]["verification"]["overall"] == "REVIEW_REQUIRED" for s in final["steps"])
-    assert "manual review required" in final["summary"] and final["summary"].startswith("4 of 4")
-    assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # already COMPLETE
-    assert c.get(f"/api/tryon/run/{run['id']}").json()["status"] == "COMPLETE"
+    assert all(s["result"]["verification"]["performed_by"] == [] for s in final["steps"])  # nobody analysed anything
+    assert all(s["status"] != "VERIFIED" for s in final["steps"])
+    assert final["summary"].startswith("MOCK / DEMO") and "NOT evidence" in final["summary"]
+    low = final["summary"].lower()
+    assert "applied" not in low.replace("nothing was applied", "") and "complete" not in low
+    assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # already FINISHED
+    assert c.get(f"/api/tryon/run/{run['id']}").json()["status"] == "FINISHED"
     with SessionLocal() as db:
         assert db.query(FashnLedger).count() == 0 and db.query(TryOnResult).count() == 4
 
@@ -741,11 +767,11 @@ def test_run_stops_at_first_failure_and_skips_the_rest_without_retry(png, monkey
     run = make_run(person, ids)
     for _ in range(3):
         v = c.post(f"/api/tryon/run/{run['id']}/next").json()
-    assert [s["status"] for s in v["steps"]] == ["VERIFIED", "VERIFIED", "FAILED", "SKIPPED"]
-    assert v["status"] == "FAILED" and "PipelineError" in v["steps"][2]["error"]
+    assert [s["status"] for s in v["steps"]] == ["REVIEW_REQUIRED", "REVIEW_REQUIRED", "FAILED", "SKIPPED"]
+    assert v["status"] == "STOPPED" and "PipelineError" in v["steps"][2]["error"]
     assert "step 3 failed" in v["steps"][3]["error"]
     assert v["final_url"] == v["steps"][1]["result"]["url"]  # last good result is kept
-    assert [s["product_presence"] for s in v["steps"]] == ["REVIEW_REQUIRED", "REVIEW_REQUIRED", "NOT_GENERATED", "NOT_GENERATED"]
+    assert [s["product_presence"] for s in v["steps"]] == ["SIMULATED"] * 4
     assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # no further steps, no retry
     assert Flaky.calls == 3
 
@@ -788,7 +814,7 @@ def test_live_run_with_raised_budget_chains_raw_results_and_spends_per_step(png,
     run = make_run(person, ids)
     for _ in range(4):
         v = c.post(f"/api/tryon/run/{run['id']}/next").json()
-    assert v["status"] == "COMPLETE" and [len(f.runs) for f in fakes] == [1, 1, 1, 1]
+    assert v["status"] == "FINISHED" and [len(f.runs) for f in fakes] == [1, 1, 1, 1]
     for k in (1, 2, 3):
         sent = base64.b64decode(json.loads(fakes[k].runs[0].content)["inputs"]["model_image"].split(",", 1)[1])
         assert sent == outs[k - 1]  # raw result of the previous step, byte for byte
