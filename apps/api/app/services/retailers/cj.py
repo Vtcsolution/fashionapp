@@ -39,7 +39,7 @@ class CJ(Retailer):
             out.append(RetailerProduct(
                 retailer=self.name, product_id=str(p["id"]), name=p.get("title", ""),
                 price=str(price.get("amount")) if price.get("amount") is not None else None,
-                currency=price.get("currency"), url=p.get("link", ""),
+                currency=price.get("currency"), url=p.get("link", ""), affiliate_url=p.get("link"),
                 image_url=p["imageLink"], image_urls=[p["imageLink"]],
             ))
         return out

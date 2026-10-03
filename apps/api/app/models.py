@@ -19,6 +19,7 @@ class Product(Base):
     price: Mapped[str | None] = mapped_column(String(32), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     product_url: Mapped[str] = mapped_column(Text)
+    affiliate_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_image_url: Mapped[str] = mapped_column(Text)  # exact URL we downloaded
     image_path: Mapped[str] = mapped_column(Text)  # exact bytes we will send
     image_sha256: Mapped[str] = mapped_column(String(64))
@@ -33,7 +34,11 @@ class TryOnJob(Base):
     __tablename__ = "tryon_jobs"
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
-    person_image_path: Mapped[str] = mapped_column(Text)
+    # Multi-product later: step N uses the result of step N-1 (parent_job_id) as its base image.
+    # For now there is only ever step 1, whose base image is the uploaded person.
+    step: Mapped[int] = mapped_column(Integer, default=1)
+    parent_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    person_image_path: Mapped[str] = mapped_column(Text)  # base image sent as model_image
     person_image_sha256: Mapped[str] = mapped_column(String(64))
     provider: Mapped[str] = mapped_column(String(16))  # mock | fashn
     fashn_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -48,10 +53,8 @@ class TryOnResult(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("tryon_jobs.id"))
     result_path: Mapped[str] = mapped_column(Text)
     result_sha256: Mapped[str] = mapped_column(String(64))
-    verification_product: Mapped[str] = mapped_column(String(16))
-    verification_identity: Mapped[str] = mapped_column(String(16))
-    verification_overall: Mapped[str] = mapped_column(String(16))
-    verification_notes: Mapped[str] = mapped_column(Text, default="")
+    verification_overall: Mapped[str] = mapped_column(String(24))
+    verification_json: Mapped[str] = mapped_column(Text)  # {"checks": {...}, "notes": "..."}
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

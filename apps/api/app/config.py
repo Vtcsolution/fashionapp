@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     # FASHN
     fashn_api_key: str = ""
     fashn_model: str = "tryon-max"
-    fashn_live_enabled: bool = False  # must be flipped explicitly; default OFF
-    fashn_live_authorization: str = ""  # must equal the exact phrase to allow a live call
+    # FASHN_LIVE_ENABLED / FASHN_LIVE_AUTHORIZATION are deliberately NOT settings: guard.py reads them
+    # from the process environment only, so a value in .env can never enable a live call.
     fashn_credit_cap: int = 2
 
     # Image rules

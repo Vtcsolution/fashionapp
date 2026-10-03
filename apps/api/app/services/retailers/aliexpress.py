@@ -49,6 +49,7 @@ class AliExpress(Retailer):
             out.append(RetailerProduct(
                 retailer=self.name, product_id=str(p["product_id"]), name=p.get("product_title", ""),
                 price=str(p.get("target_sale_price", "")) or None, currency=p.get("target_sale_price_currency", "USD"),
-                url=p.get("promotion_link") or p.get("product_detail_url", ""), image_url=imgs[0], image_urls=imgs,
+                url=p.get("product_detail_url") or p.get("promotion_link", ""),
+                affiliate_url=p.get("promotion_link"), image_url=imgs[0], image_urls=imgs,
             ))
         return out

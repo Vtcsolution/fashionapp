@@ -1,31 +1,35 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+CHECKS = ("product_presence", "product_correspondence", "color_details", "placement", "identity_preserved")
+# Each check is PASS | FAIL | NOT_CHECKED. Overall is PASS | FAIL | REVIEW_REQUIRED. No percentages.
 
 
 @dataclass
 class Verification:
-    product: str  # VERIFIED | UNVERIFIED
-    identity: str  # PRESERVED | UNKNOWN | CHANGED
-    overall: str  # PASS | REVIEW | FAIL
+    checks: dict[str, str] = field(default_factory=lambda: {c: "NOT_CHECKED" for c in CHECKS})
+    overall: str = "REVIEW_REQUIRED"
     notes: str = ""
 
 
-def decide_overall(product: str, identity: str) -> str:
-    """PASS only when both are positively confirmed; anything unconfirmed is REVIEW, never PASS."""
-    if product == "VERIFIED" and identity == "PRESERVED":
-        return "PASS"
-    if identity == "CHANGED":
+def decide_overall(checks: dict[str, str]) -> str:
+    """PASS only when every check is positively PASS. Any FAIL fails. Anything unconfirmed needs review."""
+    values = [checks.get(c, "NOT_CHECKED") for c in CHECKS]
+    if "FAIL" in values:
         return "FAIL"
-    return "REVIEW"
+    if all(v == "PASS" for v in values):
+        return "PASS"
+    return "REVIEW_REQUIRED"
 
 
-class MockVerifier:
-    """Placeholder. It cannot confirm anything, so it honestly reports REVIEW. No fake scores."""
+class PlaceholderVerifier:
+    """No computer vision yet, so it confirms nothing and says so. Slot for OpenAI/Gemini QC later."""
 
     async def verify(self, person: bytes, product: bytes, result: bytes) -> Verification:
-        product_s, identity_s = "UNVERIFIED", "UNKNOWN"
-        return Verification(product_s, identity_s, decide_overall(product_s, identity_s),
-                            "Mock verifier: no visual comparison was performed. Manual review required.")
+        v = Verification(notes="No automated visual verification is implemented yet. A human must compare "
+                               "the result with the source product image.")
+        v.overall = decide_overall(v.checks)
+        return v
 
 
-def get_verifier() -> MockVerifier:
-    return MockVerifier()  # later: Gemini visual QC behind the same interface
+def get_verifier() -> PlaceholderVerifier:
+    return PlaceholderVerifier()

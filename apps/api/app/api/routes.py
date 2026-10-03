@@ -1,10 +1,13 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+import json
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
 from ..models import Product, TryOnJob, TryOnResult
+from ..services.fashn.guard import vto_mode
 from ..services.images import ImageRejected, download_best_image, validate_image_bytes
 from ..services.retailers.aggregator import search_all
 from ..services.retailers.base import RetailerProduct
@@ -18,7 +21,7 @@ MAX_PERSON_BYTES = 15 * 1024 * 1024
 @router.get("/health")
 def health():
     # booleans only; no secret values
-    return {"ok": True, "configured": settings.configured(), "fashn_live_enabled": settings.fashn_live_enabled}
+    return {"ok": True, "configured": settings.configured(), "vto_mode": vto_mode()}
 
 
 @router.get("/products/search")
@@ -53,7 +56,7 @@ async def select_product(p: RetailerProduct, db: Session = Depends(get_db)):
     rel, digest = storage.save_bytes("products", data, ext)
     row = Product(
         retailer=p.retailer, retailer_product_id=p.product_id, name=p.name, price=p.price, currency=p.currency,
-        product_url=p.url, source_image_url=url, image_path=rel, image_sha256=digest, image_width=w, image_height=h,
+        product_url=p.url, affiliate_url=p.affiliate_url, source_image_url=url, image_path=rel, image_sha256=digest, image_width=w, image_height=h,
     )
     db.add(row)
     db.commit()
@@ -72,18 +75,17 @@ def _job_view(db: Session, job: TryOnJob):
         "id": job.id, "status": job.status, "provider": job.provider, "error": job.error,
         "person_url": f"/files/{job.person_image_path}",
         "product": {"id": prod.id, "name": prod.name, "price": prod.price, "currency": prod.currency,
-                    "retailer": prod.retailer, "url": prod.product_url,
+                    "retailer": prod.retailer, "url": prod.product_url, "affiliate_url": prod.affiliate_url,
                     "image_url": f"/files/{prod.image_path}", "source_image_url": prod.source_image_url},
         "result": res and {
             "url": f"/files/{res.result_path}",
-            "verification": {"product": res.verification_product, "identity": res.verification_identity,
-                             "overall": res.verification_overall, "notes": res.verification_notes},
+            "verification": {"overall": res.verification_overall, **json.loads(res.verification_json)},
         },
     }
 
 
 @router.post("/tryon")
-async def create_tryon(req: TryOnRequest, bg: BackgroundTasks, db: Session = Depends(get_db)):
+async def create_tryon(req: TryOnRequest, db: Session = Depends(get_db)):
     prod = db.get(Product, req.product_id)
     if not prod:
         raise HTTPException(404, "product not selected")
@@ -93,11 +95,12 @@ async def create_tryon(req: TryOnRequest, bg: BackgroundTasks, db: Session = Dep
     job = TryOnJob(
         product_id=prod.id, person_image_path=req.person_path,
         person_image_sha256=req.person_path.split("/")[-1].split(".")[0],
-        provider="live" if settings.fashn_live_enabled else "mock",
+        provider=vto_mode(),
     )
     db.add(job)
     db.commit()
-    bg.add_task(run_job, job.id)
+    await run_job(job.id)  # inline, once; never a background task
+    db.refresh(job)
     return _job_view(db, job)
 
 

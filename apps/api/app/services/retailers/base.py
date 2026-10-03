@@ -7,7 +7,8 @@ class RetailerProduct(BaseModel):
     name: str
     price: str | None = None
     currency: str | None = None
-    url: str
+    url: str  # product page
+    affiliate_url: str | None = None  # tracked link, when the retailer API provides one
     image_url: str  # best (largest) image we could find
     image_urls: list[str] = []
 

@@ -52,6 +52,6 @@ class Rakuten(Retailer):
                 retailer=self.name, product_id=g("sku") or g("upccode") or g("linkid"), name=g("productname"),
                 price=(price.text.strip() if price is not None and price.text else None),
                 currency=(price.get("currency") if price is not None else None),
-                url=g("linkurl"), image_url=g("imageurl"), image_urls=[g("imageurl")],
+                url=g("linkurl"), affiliate_url=g("linkurl"), image_url=g("imageurl"), image_urls=[g("imageurl")],
             ))
         return out
