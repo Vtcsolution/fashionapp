@@ -21,16 +21,21 @@ type Product = {
   category: string;
 };
 type Verification = { overall: string; checks: Record<string, string>; notes: string };
-type Job = {
+type Step = {
   id: number;
   step: number;
-  status: string;
+  status: string; // PLANNED | SENT | GENERATED | VERIFIED | FAILED | SKIPPED
   provider: string;
   error: string | null;
   person_url: string;
-  product: { name: string; price: string | null; currency: string | null; retailer: string; url: string; affiliate_url: string | null; image_url: string };
+  product_presence: string; // NOT_GENERATED | REVIEW_REQUIRED | PRESENT | ABSENT
+  product: {
+    id: number; retailer_product_id: string; category: string; name: string; price: string | null; currency: string | null;
+    retailer: string; url: string; affiliate_url: string | null; image_url: string;
+  };
   result: null | { url: string; verification: Verification };
 };
+type Run = { id: number; status: string; total_steps: number; person_url: string; steps: Step[]; final_url: string | null; summary: string };
 
 const CHECK_LABELS: Record<string, string> = {
   product_presence: "Product presence",
@@ -40,7 +45,11 @@ const CHECK_LABELS: Record<string, string> = {
   identity_preserved: "Identity preserved",
 };
 const tone = (v: string) =>
-  v === "PASS" ? "bg-emerald-100 text-emerald-800" : v === "FAIL" ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-800";
+  ["PASS", "PRESENT", "VERIFIED", "COMPLETE"].includes(v) ? "bg-emerald-100 text-emerald-800"
+    : ["FAIL", "FAILED", "ABSENT"].includes(v) ? "bg-red-100 text-red-800"
+    : ["PLANNED", "SKIPPED", "NOT_GENERATED"].includes(v) ? "bg-gray-100 text-gray-600"
+    : "bg-amber-100 text-amber-800";
+const label = (v: string) => v.replace(/_/g, " ");
 const shopUrl = (p: { url: string; affiliate_url: string | null }) => p.affiliate_url || p.url;
 const price = (p: { price: string | null; currency: string | null }) => (p.price ? `${p.price} ${p.currency ?? ""}` : "Price on site");
 const retailerName = (r: string) => (r === "aliexpress" ? "AliExpress" : r === "ebay" ? "eBay" : r);
@@ -66,8 +75,7 @@ export default function Page() {
   const [retailerStatus, setRetailerStatus] = useState<Record<string, string>>({});
   const [hasSearched, setHasSearched] = useState(false);
   const [selection, setSelection] = useState<Selection<Product>>({});
-  const [jobs, setJobs] = useState<Job[]>([]); // one per try-on step, in order
-  const [plan, setPlan] = useState(0); // how many steps this run intended
+  const [run, setRun] = useState<Run | null>(null);
   const [progress, setProgress] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -100,9 +108,9 @@ export default function Page() {
     }
     return r.json();
   }
-  const guard = async (label: string, fn: () => Promise<void>) => {
+  const guard = async (text: string, fn: () => Promise<void>) => {
     setError("");
-    setBusy(label);
+    setBusy(text);
     try {
       await fn();
     } catch (e) {
@@ -113,10 +121,6 @@ export default function Page() {
     }
   };
 
-  const clearResults = () => {
-    setJobs([]);
-    setPlan(0);
-  };
   const upload = (f: File) =>
     guard("Uploading your photo…", async () => {
       const fd = new FormData();
@@ -124,12 +128,12 @@ export default function Page() {
       const j = await call<{ person_path: string; url: string }>("/api/uploads/person", { method: "POST", body: fd });
       setPersonPath(j.person_path);
       setPersonUrl(`${API}${j.url}`);
-      clearResults();
+      setRun(null);
     });
   const removePhoto = () => {
     setPersonPath(null);
     setPersonUrl(null);
-    clearResults();
+    setRun(null);
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -143,40 +147,40 @@ export default function Page() {
       setSearched(j.searched);
       setHasSearched(true);
       setSelection({});
-      clearResults();
+      setRun(null);
     });
 
-  // Each product is its own request = its own generation. Step N starts from the raw result of step N-1.
-  // The loop stops at the first failure. Nothing is ever retried, here or in the backend.
+  // 1) store the whole plan on the server, 2) execute it one step per request. Each step is one generation
+  // that starts from the raw result of the previous step. The first failure stops the run. No retries.
   const tryOn = () => {
     if (!readiness.ok || !personPath) return;
-    if (live) {
-      const msg = `This runs ${queue.length} REAL FASHN generation${queue.length === 1 ? "" : "s"} (${cost} credits). Continue?`;
-      if (!window.confirm(msg)) return;
-    }
+    if (live && !window.confirm(`This runs ${queue.length} REAL FASHN generation${queue.length === 1 ? "" : "s"} (${cost} credits). Continue?`)) return;
     const items = [...queue];
     return guard(live ? "Creating your try-on…" : "Creating a mock try-on…", async () => {
-      clearResults();
-      setPlan(items.length);
-      let base: number | null = null;
-      const done: Job[] = [];
+      setRun(null);
+      const ids: number[] = [];
       for (let i = 0; i < items.length; i++) {
-        setProgress(`Step ${i + 1} of ${items.length}: ${items[i].name.slice(0, 50)}`);
+        setProgress(`Preparing product ${i + 1} of ${items.length}…`);
         const sel = await call<{ id: number }>("/api/products/select", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(items[i]),
         });
-        const job: Job = await call<Job>("/api/tryon", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ product_id: sel.id, person_path: personPath, base_job_id: base }),
-        });
-        done.push(job);
-        setJobs([...done]);
-        setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
-        if (job.status !== "VERIFIED") break; // stop on failure
-        base = job.id;
+        ids.push(sel.id);
+      }
+      let r = await call<Run>("/api/tryon/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ person_path: personPath, product_ids: ids }),
+      });
+      setRun(r);
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+      while (r.status === "PLANNED" || r.status === "RUNNING") {
+        const i = r.steps.findIndex((s) => s.status === "PLANNED");
+        if (i < 0) break;
+        setProgress(`Step ${i + 1} of ${r.total_steps}: ${r.steps[i].product.name.slice(0, 50)}`);
+        r = await call<Run>(`/api/tryon/run/${r.id}/next`, { method: "POST" });
+        setRun(r);
       }
       refreshHealth();
     });
@@ -184,9 +188,10 @@ export default function Page() {
 
   const scrollToCategory = (c: string) => document.getElementById(`cat-${c}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
-  const finished = jobs.filter((j) => j.status === "VERIFIED" && j.result);
+  const steps = run?.steps ?? [];
+  const finished = steps.filter((s) => s.status === "VERIFIED" && s.result);
   const final = finished[finished.length - 1];
-  const failed = jobs.find((j) => j.status === "FAILED");
+  const failed = steps.find((s) => s.status === "FAILED");
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-violet-50 via-white to-white text-gray-900">
@@ -239,7 +244,7 @@ export default function Page() {
             <div className="flex flex-col gap-3 sm:flex-row">
               <input
                 className="flex-1 rounded-xl border bg-white p-4 text-lg shadow-sm outline-none focus:ring-2 focus:ring-violet-400"
-                placeholder="e.g. black leather jacket with white sneakers"
+                placeholder="e.g. beige jacket, white dress, brown sandals, brown leather handbag"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && prompt.trim() && !busy && search()}
@@ -248,7 +253,7 @@ export default function Page() {
                 SEARCH
               </button>
             </div>
-            <p className="mt-2 text-xs text-gray-500">Up to 4 items per search · try “red dress with black heels and handbag” · add a budget like “under $100”</p>
+            <p className="mt-2 text-xs text-gray-500">Up to 4 items per search · separate items with commas or “with” · add a budget like “under $100”</p>
           </section>
         )}
 
@@ -292,10 +297,10 @@ export default function Page() {
           </section>
         )}
 
-        {/* 4. Selected items, in try-on order */}
+        {/* 4. Your look: every selected product, in the order it will be applied */}
         {personPath && queue.length > 0 && (
           <section>
-            <StepTitle n={4} title="Your look" hint={`${queue.length} item${queue.length === 1 ? "" : "s"} · tried on one after another, in this order`} />
+            <StepTitle n={4} title="Your look" hint={`${queue.length} product${queue.length === 1 ? "" : "s"} selected`} />
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {queue.map((p, i) => (
                 <div key={keyOf(p)} className="flex gap-3 rounded-2xl border bg-white p-3 shadow-sm">
@@ -318,7 +323,7 @@ export default function Page() {
           </section>
         )}
 
-        {/* TRYON U */}
+        {/* TRYON U + planned sequence */}
         {personPath && hasSearched && (
           <section className="text-center">
             <button
@@ -326,34 +331,46 @@ export default function Page() {
               disabled={!readiness.ok || !!busy}
               className="rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 px-14 py-5 text-2xl font-extrabold tracking-wide text-white shadow-lg transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100"
             >
-              TRYON U{queue.length > 1 ? ` · ${queue.length} items` : ""}
+              TRYON U
             </button>
-            {readiness.ok && queue.length > 1 && (
-              <p className="mx-auto mt-3 max-w-xl text-sm text-gray-600">
-                {queue.length} separate try-ons run in order; each starts from the previous result.
-                {live && credits ? ` Uses ${cost} FASHN credits.` : " Demo mode: free."}
-              </p>
+            {queue.length > 0 && (
+              <div className="mx-auto mt-4 max-w-xl rounded-2xl border bg-white p-4 text-left shadow-sm">
+                <p className="text-sm font-semibold">
+                  {queue.length} product{queue.length === 1 ? "" : "s"} will be applied sequentially:
+                </p>
+                <ol className="mt-2 space-y-1 text-sm">
+                  {queue.map((p, i) => (
+                    <li key={keyOf(p)} className="flex gap-2">
+                      <span className="w-5 shrink-0 font-bold text-violet-600">{i + 1}.</span>
+                      <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                      <span className="shrink-0 text-xs uppercase text-gray-400">{CATEGORY_LABEL[p.category] ?? p.category}</span>
+                    </li>
+                  ))}
+                </ol>
+                <p className="mt-2 text-xs text-gray-500">
+                  Each step starts from the previous result. {live && credits ? `Uses ${cost} FASHN credits.` : "Demo mode: free."}
+                </p>
+              </div>
             )}
-            {readiness.ok && queue.length === 1 && live && credits && <p className="mt-3 text-sm text-gray-600">Uses {cost} FASHN credits.</p>}
             {!readiness.ok && <p className="mx-auto mt-3 max-w-xl rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{readiness.message}</p>}
           </section>
         )}
 
         {/* Result */}
-        {jobs.length > 0 && (
+        {run && (
           <section ref={resultRef} className="scroll-mt-6 space-y-6">
-            <StepTitle n={5} title="Your try-on" hint={plan > 1 ? `${finished.length} of ${plan} steps done` : undefined} />
-            {jobs.some((j) => j.provider === "mock") && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Demo result — a placeholder, not a real try-on. No credits were used.</p>}
+            <StepTitle n={5} title="Your try-on" hint={`${finished.length} of ${run.total_steps} products applied · ${label(run.status)}`} />
+            {steps.some((s) => s.provider === "mock") && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Demo result — a placeholder, not a real try-on. No credits were used.</p>}
             {failed && (
               <p className="rounded-xl border border-red-300 bg-red-50 p-3 text-red-800">
-                Step {failed.step} ({failed.product.name.slice(0, 50)}) failed: {failed.error}. Nothing was retried.
+                Step {failed.step} ({failed.product.name.slice(0, 50)}) failed: {failed.error}. Nothing was retried; later steps were skipped.
                 {finished.length > 0 ? ` Showing the result after step ${finished.length}.` : ""}
               </p>
             )}
             <div className="grid gap-8 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
               <div>
-                {final?.result ? (
-                  <img src={`${API}${final.result.url}`} alt="Your try-on" className="w-full rounded-2xl border shadow-lg" />
+                {run.final_url ? (
+                  <img src={`${API}${run.final_url}`} alt="Your try-on" className="w-full rounded-2xl border shadow-lg" />
                 ) : (
                   <div className="flex h-96 items-center justify-center rounded-2xl border bg-white text-gray-400">{busy ? "Generating…" : "No image generated"}</div>
                 )}
@@ -362,31 +379,32 @@ export default function Page() {
               <div className="space-y-5">
                 {final?.result && (
                   <div className="rounded-2xl border bg-white p-4 shadow-sm">
-                    <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Verification{plan > 1 ? ` · last step (${final.step})` : ""}</p>
+                    <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Verification</p>
                     <p className={`mt-1 inline-block rounded-lg px-3 py-1 text-lg font-bold ${tone(final.result.verification.overall)}`}>
-                      {final.result.verification.overall.replace("_", " ")}
+                      {label(final.result.verification.overall)}
                     </p>
                     <ul className="mt-3 space-y-1 text-sm">
                       {Object.entries(final.result.verification.checks).map(([k, v]) => (
                         <li key={k} className="flex items-center justify-between">
                           <span>{CHECK_LABELS[k] ?? k}</span>
-                          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(v)}`}>{v.replace("_", " ")}</span>
+                          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(v)}`}>{label(v)}</span>
                         </li>
                       ))}
                     </ul>
-                    <p className="mt-3 text-xs text-gray-500">{final.result.verification.notes}</p>
+                    <p className="mt-3 text-xs text-gray-500">{run.summary}</p>
+                    <p className="mt-1 text-xs text-gray-500">{final.result.verification.notes}</p>
                   </div>
                 )}
                 <div className="rounded-2xl border bg-white p-4 shadow-sm">
                   <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Shop this look</p>
                   <div className="mt-2 space-y-3">
-                    {jobs.map((j) => (
-                      <div key={j.id} className="flex gap-3">
-                        <img src={`${API}${j.product.image_url}`} alt={j.product.name} className="h-20 w-20 shrink-0 rounded-xl bg-gray-50 object-contain" />
+                    {steps.map((s) => (
+                      <div key={s.id} className="flex gap-3">
+                        <img src={`${API}${s.product.image_url}`} alt={s.product.name} className="h-20 w-20 shrink-0 rounded-xl bg-gray-50 object-contain" />
                         <div className="min-w-0 flex-1 text-sm">
-                          <p className="line-clamp-2 font-medium leading-5">{j.step}. {j.product.name}</p>
-                          <p className="font-semibold">{price(j.product)} <span className="font-normal text-gray-500">· {retailerName(j.product.retailer)}</span></p>
-                          <a href={shopUrl(j.product)} target="_blank" rel="noreferrer" className="mt-1 inline-block rounded-lg bg-black px-4 py-1.5 text-xs font-bold tracking-wide text-white hover:bg-gray-800">
+                          <p className="line-clamp-2 font-medium leading-5">{s.step}. {s.product.name}</p>
+                          <p className="font-semibold">{price(s.product)} <span className="font-normal text-gray-500">· {retailerName(s.product.retailer)}</span></p>
+                          <a href={shopUrl(s.product)} target="_blank" rel="noreferrer" className="mt-1 inline-block rounded-lg bg-black px-4 py-1.5 text-xs font-bold tracking-wide text-white hover:bg-gray-800">
                             SHOP PRODUCT
                           </a>
                         </div>
@@ -397,25 +415,54 @@ export default function Page() {
               </div>
             </div>
 
-            {jobs.length > 1 && (
+            {/* Per-step tracking: every selected product, start to finish */}
+            <div>
+              <p className="mb-2 text-xs font-bold uppercase tracking-widest text-gray-400">Product tracking</p>
+              <div className="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                    <tr>
+                      <th className="p-3">Step</th><th className="p-3">Product</th><th className="p-3">Category</th>
+                      <th className="p-3">Retailer · ID</th><th className="p-3">Generation</th><th className="p-3">Product in result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {steps.map((s) => (
+                      <tr key={s.id} className="border-t">
+                        <td className="p-3 font-bold">{s.step}</td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-2">
+                            <img src={`${API}${s.product.image_url}`} alt="" className="h-10 w-10 rounded bg-gray-50 object-contain" />
+                            <span className="line-clamp-2 max-w-[220px]">{s.product.name}</span>
+                          </div>
+                        </td>
+                        <td className="p-3">{CATEGORY_LABEL[s.product.category] ?? s.product.category}</td>
+                        <td className="p-3 text-xs text-gray-600">{retailerName(s.product.retailer)} · {s.product.retailer_product_id.slice(0, 16)}</td>
+                        <td className="p-3"><span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(s.status)}`}>{label(s.status)}</span></td>
+                        <td className="p-3"><span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(s.product_presence)}`}>{label(s.product_presence)}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {steps.length > 1 && (
               <div>
                 <p className="mb-2 text-xs font-bold uppercase tracking-widest text-gray-400">Step by step</p>
                 <div className="flex gap-4 overflow-x-auto pb-2">
                   <figure className="w-40 shrink-0">
-                    <img src={`${API}${jobs[0].person_url}`} alt="Original" className="h-52 w-full rounded-xl border object-cover" />
+                    <img src={`${API}${run.person_url}`} alt="Original" className="h-52 w-full rounded-xl border object-cover" />
                     <figcaption className="mt-1 text-xs text-gray-500">Original</figcaption>
                   </figure>
-                  {jobs.map((j) => (
-                    <figure key={j.id} className="w-40 shrink-0">
-                      {j.result ? (
-                        <img src={`${API}${j.result.url}`} alt={`Step ${j.step}`} className="h-52 w-full rounded-xl border object-cover" />
+                  {steps.map((s) => (
+                    <figure key={s.id} className="w-40 shrink-0">
+                      {s.result ? (
+                        <img src={`${API}${s.result.url}`} alt={`Step ${s.step}`} className="h-52 w-full rounded-xl border object-cover" />
                       ) : (
-                        <div className="flex h-52 items-center justify-center rounded-xl border bg-red-50 text-xs text-red-700">failed</div>
+                        <div className={`flex h-52 items-center justify-center rounded-xl border text-xs ${tone(s.status)}`}>{label(s.status).toLowerCase()}</div>
                       )}
-                      <figcaption className="mt-1 text-xs text-gray-600">
-                        {j.step}. {j.product.name.slice(0, 28)}
-                        {j.result && <span className={`ml-1 rounded px-1 py-0.5 text-[10px] font-semibold ${tone(j.result.verification.overall)}`}>{j.result.verification.overall.replace("_", " ")}</span>}
-                      </figcaption>
+                      <figcaption className="mt-1 text-xs text-gray-600">{s.step}. {s.product.name.slice(0, 28)}</figcaption>
                     </figure>
                   ))}
                 </div>

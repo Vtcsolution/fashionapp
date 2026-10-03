@@ -20,6 +20,7 @@ class Product(Base):
     currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     product_url: Mapped[str] = mapped_column(Text)
     affiliate_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(32), default="other")
     source_image_url: Mapped[str] = mapped_column(Text)  # exact URL we downloaded
     image_path: Mapped[str] = mapped_column(Text)  # exact bytes we will send
     image_sha256: Mapped[str] = mapped_column(String(64))
@@ -30,12 +31,26 @@ class Product(Base):
 
 # Per-product state is kept on the job so 1 -> N products only needs more jobs/items later.
 # States: SELECTED -> SENT -> GENERATED -> VERIFIED | FAILED
+class TryOnRun(Base):
+    """A multi-product try-on plan. All steps are stored up front, so no selected product can be dropped silently.
+
+    PLANNED -> RUNNING -> COMPLETE | FAILED. Each step is one TryOnJob (one FASHN generation).
+    """
+
+    __tablename__ = "tryon_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    person_image_path: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="PLANNED")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class TryOnJob(Base):
     __tablename__ = "tryon_jobs"
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
-    # Multi-product later: step N uses the result of step N-1 (parent_job_id) as its base image.
-    # For now there is only ever step 1, whose base image is the uploaded person.
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # set when part of a multi-product run
+    # Step N uses the raw result of step N-1 (parent_job_id) as its base image; step 1 uses the uploaded person.
+    # Job states: PLANNED -> SELECTED -> SENT -> GENERATED -> VERIFIED | FAILED | SKIPPED
     step: Mapped[int] = mapped_column(Integer, default=1)
     parent_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     person_image_path: Mapped[str] = mapped_column(Text)  # base image sent as model_image

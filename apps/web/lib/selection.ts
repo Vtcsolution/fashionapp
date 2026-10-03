@@ -92,7 +92,7 @@ export function tryOnReadiness(
         message:
           allowed === 0
             ? "The live credit budget is used up."
-            : `The live credit budget allows ${allowed} more generation${allowed === 1 ? "" : "s"} (${remaining} credits left) but you picked ${queue.length}. Remove items or raise the budget.`,
+            : `The live credit budget allows ${allowed} more generation${allowed === 1 ? "" : "s"} (${remaining} credits left) but you picked ${queue.length}. Your selection is kept: run it in demo mode, or authorize more credits for a live multi-product run.`,
       };
   }
   return { ok: true, message: "" };

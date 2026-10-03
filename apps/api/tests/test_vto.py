@@ -526,6 +526,10 @@ def test_main_noun():
     ("blue jeans", "Skinny Jeans Stretch Denim", True),
     ("blue jeans", "Jean Paul Gaultier Le Male Perfume Spray 4.2 oz", False),         # fragrance, not jeans
     ("handbag", "Ladies Bag Handle Wrap Silk Scarf", False),
+    ("white dress", "Men Formal Dress Shirt Long Sleeve Office", False),       # dress shirt is not a dress
+    ("white dress", "Women Dress Shoes Pointed Toe", False),
+    ("white dress", "Women White Summer Dress Floral", True),
+    ("white dress", "Boho Maxi Dresses for Women", True),
     ("halloween costume", "Adult Halloween Costume Witch", True),                    # user asked for it
 ])
 def test_is_relevant(part, title, ok):
@@ -653,3 +657,141 @@ def test_live_chain_with_raised_cap_sends_previous_result_as_model_image(png, mo
 
 def test_health_reports_credit_budget():
     assert c.get("/api/health").json()["credits"] == {"per_generation": 2, "cap": 2, "spent": 0}
+
+
+# ---------- multi-product RUN: plan stored first, one generation per step, every product tracked ----------
+from app.models import TryOnRun  # noqa: E402
+
+CATS = ["outerwear", "dresses", "shoes", "bags"]
+
+
+def seed_run_products(png, retailer="ebay"):
+    person, ids = seed_products(png, 4, retailer)
+    with SessionLocal() as db:
+        for pid, cat in zip(ids, CATS):
+            p = db.get(Product, pid)
+            p.category, p.name, p.retailer_product_id = cat, f"{cat.title()} Item", f"R-{cat}"
+        db.commit()
+    return person, ids
+
+
+def make_run(person, ids):
+    r = c.post("/api/tryon/run", json={"person_path": person, "product_ids": ids})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_run_plan_is_stored_before_anything_runs(png):
+    person, ids = seed_run_products(png)
+    run = make_run(person, ids)
+    assert run["status"] == "PLANNED" and run["total_steps"] == 4 and run["final_url"] is None
+    assert [s["status"] for s in run["steps"]] == ["PLANNED"] * 4
+    assert [s["product"]["id"] for s in run["steps"]] == ids  # the exact selected products, in order
+    assert [s["step"] for s in run["steps"]] == [1, 2, 3, 4]
+    assert [s["product_presence"] for s in run["steps"]] == ["NOT_GENERATED"] * 4
+    with SessionLocal() as db:
+        assert db.query(FashnLedger).count() == 0
+
+
+def test_four_product_mock_run_tracks_every_product_through_every_step(png):
+    person, ids = seed_run_products(png)
+    run = make_run(person, ids)
+    views = []
+    for i in range(4):
+        v = c.post(f"/api/tryon/run/{run['id']}/next").json()
+        views.append(v)
+        done = [s["status"] for s in v["steps"]]
+        assert done == ["VERIFIED"] * (i + 1) + ["PLANNED"] * (3 - i)  # exactly one step per call
+        assert v["status"] == ("COMPLETE" if i == 3 else "RUNNING")
+    final = views[-1]
+    # every selected product is still there, unchanged, in order, with its identity fields
+    assert [(s["step"], s["product"]["id"], s["product"]["category"], s["product"]["retailer_product_id"],
+             s["product"]["retailer"], s["product"]["name"]) for s in final["steps"]] == [
+        (i + 1, ids[i], CATS[i], f"R-{CATS[i]}", "ebay", f"{CATS[i].title()} Item") for i in range(4)]
+    assert all(s["provider"] == "mock" for s in final["steps"])
+    # chain: step 1 starts from the person, step k+1 from the raw result of step k
+    assert final["steps"][0]["person_url"].startswith("/files/persons/")
+    for k in (1, 2, 3):
+        assert final["steps"][k]["person_url"] == final["steps"][k - 1]["result"]["url"]
+        assert final["steps"][k]["parent_job_id"] == final["steps"][k - 1]["id"]
+    assert final["final_url"] == final["steps"][3]["result"]["url"]
+    # honesty: nothing is claimed as verified
+    assert [s["product_presence"] for s in final["steps"]] == ["REVIEW_REQUIRED"] * 4
+    assert all(s["result"]["verification"]["overall"] == "REVIEW_REQUIRED" for s in final["steps"])
+    assert "manual review required" in final["summary"] and final["summary"].startswith("4 of 4")
+    assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # already COMPLETE
+    assert c.get(f"/api/tryon/run/{run['id']}").json()["status"] == "COMPLETE"
+    with SessionLocal() as db:
+        assert db.query(FashnLedger).count() == 0 and db.query(TryOnResult).count() == 4
+
+
+def test_run_stops_at_first_failure_and_skips_the_rest_without_retry(png, monkeypatch):
+    class Flaky:
+        provider = "mock"
+        calls = 0
+
+        async def try_on(self, person, pext, product, xext, on_prediction_id=None):
+            Flaky.calls += 1
+            if Flaky.calls == 3:
+                raise FashnError("PipelineError", "boom")
+            return await MockFashnClient().try_on(person, pext, product, xext, on_prediction_id)
+
+    monkeypatch.setattr("app.services.tryon.get_client", lambda: Flaky())
+    person, ids = seed_run_products(png)
+    run = make_run(person, ids)
+    for _ in range(3):
+        v = c.post(f"/api/tryon/run/{run['id']}/next").json()
+    assert [s["status"] for s in v["steps"]] == ["VERIFIED", "VERIFIED", "FAILED", "SKIPPED"]
+    assert v["status"] == "FAILED" and "PipelineError" in v["steps"][2]["error"]
+    assert "step 3 failed" in v["steps"][3]["error"]
+    assert v["final_url"] == v["steps"][1]["result"]["url"]  # last good result is kept
+    assert [s["product_presence"] for s in v["steps"]] == ["REVIEW_REQUIRED", "REVIEW_REQUIRED", "NOT_GENERATED", "NOT_GENERATED"]
+    assert c.post(f"/api/tryon/run/{run['id']}/next").status_code == 400  # no further steps, no retry
+    assert Flaky.calls == 3
+
+
+def test_run_validation(png):
+    person, ids = seed_run_products(png)
+    post = lambda **kw: c.post("/api/tryon/run", json={"person_path": person, "product_ids": ids, **kw})  # noqa: E731
+    assert post(product_ids=[]).status_code == 400
+    assert post(product_ids=[ids[0], ids[0]]).status_code == 400
+    assert post(product_ids=[ids[0], 9999]).status_code == 404
+    assert c.post("/api/tryon/run", json={"person_path": "../.env", "product_ids": ids}).status_code == 400
+    assert post(product_ids=list(range(1, 10))).status_code == 400  # over the item limit
+    assert c.post("/api/tryon/run/999/next").status_code == 404 and c.get("/api/tryon/run/999").status_code == 404
+
+
+def test_live_run_is_refused_up_front_when_it_cannot_finish_under_the_budget(png, monkeypatch):
+    live_env(monkeypatch)
+    fake = FakeFashn(png(1024, 1365))
+    fake_live(monkeypatch, fake)
+    person, ids = seed_run_products(png)
+    r = c.post("/api/tryon/run", json={"person_path": person, "product_ids": ids})  # 4 x 2 = 8 > cap 2
+    assert r.status_code == 400 and "Nothing was started" in r.json()["detail"]
+    with SessionLocal() as db:
+        assert db.query(TryOnRun).count() == 0 and db.query(FashnLedger).count() == 0
+    assert fake.requests == []  # no FASHN traffic at all
+    one = c.post("/api/tryon/run", json={"person_path": person, "product_ids": ids[:1]})
+    assert one.status_code == 200  # the single-product live test is still allowed (2 credits)
+
+
+def test_live_run_with_raised_budget_chains_raw_results_and_spends_per_step(png, monkeypatch):
+    import base64
+
+    live_env(monkeypatch)
+    monkeypatch.setattr(settings, "fashn_credit_cap", 8)  # operator-raised budget (not the default)
+    outs = [png(1024, 1365, (10 + 40 * i, 200 - 40 * i, 90)) for i in range(4)]
+    fakes, it = [FakeFashn(o) for o in outs], None
+    it = iter(fakes)
+    monkeypatch.setattr("app.services.tryon.get_client", lambda: next(it).client())
+    person, ids = seed_run_products(png)
+    run = make_run(person, ids)
+    for _ in range(4):
+        v = c.post(f"/api/tryon/run/{run['id']}/next").json()
+    assert v["status"] == "COMPLETE" and [len(f.runs) for f in fakes] == [1, 1, 1, 1]
+    for k in (1, 2, 3):
+        sent = base64.b64decode(json.loads(fakes[k].runs[0].content)["inputs"]["model_image"].split(",", 1)[1])
+        assert sent == outs[k - 1]  # raw result of the previous step, byte for byte
+    with SessionLocal() as db:
+        assert sum(r.credits for r in db.query(FashnLedger)) == 8
+    assert all(s["provider"] == "fashn" for s in v["steps"])

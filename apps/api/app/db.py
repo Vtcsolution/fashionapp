@@ -21,3 +21,18 @@ def init_db():
     from . import models  # noqa: F401
 
     Base.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns():
+    """Tiny in-place migration for the dev SQLite DB, so existing rows (e.g. the credit ledger) are kept."""
+    from sqlalchemy import inspect, text
+
+    wanted = {"products": {"category": "VARCHAR(32) DEFAULT 'other'"}, "tryon_jobs": {"run_id": "INTEGER"}}
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in wanted.items():
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in cols.items():
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))

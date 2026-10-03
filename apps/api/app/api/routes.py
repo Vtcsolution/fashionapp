@@ -60,7 +60,7 @@ async def select_product(p: RetailerProduct, db: Session = Depends(get_db)):
     rel, digest = storage.save_bytes("products", data, ext)
     row = Product(
         retailer=p.retailer, retailer_product_id=p.product_id, name=p.name, price=p.price, currency=p.currency,
-        product_url=p.url, affiliate_url=p.affiliate_url, source_image_url=url, image_path=rel, image_sha256=digest, image_width=w, image_height=h,
+        product_url=p.url, affiliate_url=p.affiliate_url, category=p.category, source_image_url=url, image_path=rel, image_sha256=digest, image_width=w, image_height=h,
     )
     db.add(row)
     db.commit()
@@ -81,7 +81,8 @@ def _job_view(db: Session, job: TryOnJob):
     return {
         "id": job.id, "step": job.step, "parent_job_id": job.parent_job_id, "status": job.status, "provider": job.provider, "error": job.error,
         "person_url": f"/files/{job.person_image_path}",
-        "product": {"id": prod.id, "name": prod.name, "price": prod.price, "currency": prod.currency,
+        "product": {"id": prod.id, "retailer_product_id": prod.retailer_product_id, "category": prod.category,
+                    "name": prod.name, "price": prod.price, "currency": prod.currency,
                     "retailer": prod.retailer, "url": prod.product_url, "affiliate_url": prod.affiliate_url,
                     "image_url": f"/files/{prod.image_path}", "source_image_url": prod.source_image_url},
         "result": res and {

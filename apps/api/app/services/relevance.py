@@ -21,6 +21,20 @@ _NEGATIVE = {"costume", "costumes", "cosplay", "halloween", "organizer", "organi
              "parfum", "spray", "deodorant"}
 
 
+# "dress shirt", "dress shoes", "dress pants" contain the word dress but are not dresses.
+_DRESS_COMPOUNDS = {"shirt", "shirts", "shoe", "shoes", "pants", "pant", "socks", "sock", "boots", "boot", "code",
+                    "watch", "watches", "belt", "belts", "slacks", "trousers", "coat", "coats", "up"}
+
+
+def _has_real_dress(title_words: list[str]) -> bool:
+    for i, w in enumerate(title_words):
+        if _stem(w) == "dress" or w.endswith("dress"):
+            nxt = title_words[i + 1] if i + 1 < len(title_words) else ""
+            if nxt not in _DRESS_COMPOUNDS:
+                return True
+    return False
+
+
 def _words(text: str) -> list[str]:
     return _WORD.findall((text or "").lower())
 
@@ -47,4 +61,6 @@ def is_relevant(part: str, title: str) -> bool:
     noun = main_noun(part)
     if noun is None:
         return True
+    if noun == "dress" and not _has_real_dress(title_words):
+        return False
     return any(_stem(w) == noun or _stem(w).endswith(noun) for w in title_words)  # 'tshirt'/'handbag' still match
