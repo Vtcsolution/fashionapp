@@ -9,7 +9,7 @@ from ..db import get_db
 from ..models import Product, TryOnJob, TryOnResult
 from ..services.fashn.guard import vto_mode
 from ..services.images import ImageRejected, download_best_image, validate_image_bytes
-from ..services.retailers.aggregator import ACTIVE, search_all
+from ..services.retailers.aggregator import ACTIVE, parse_query, search_all, split_prompt
 from ..services.retailers.base import RetailerProduct
 from ..services.storage import local as storage
 from ..services.tryon import run_job
@@ -30,7 +30,7 @@ async def search(q: str, limit: int = 8):
     if not q.strip():
         raise HTTPException(400, "empty query")
     products, status = await search_all(q.strip(), limit)
-    return {"products": products, "retailers": status}
+    return {"products": products, "retailers": status, "searched": split_prompt(parse_query(q.strip())[0])}
 
 
 @router.post("/uploads/person")

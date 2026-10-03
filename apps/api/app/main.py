@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,8 +17,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TryOnU VTO", lifespan=lifespan)
+def _origins(raw: str) -> list[str]:
+    """CORS_ORIGINS may be a JSON list (as in .env) or comma-separated."""
+    try:
+        v = json.loads(raw)
+        return [str(o) for o in v] if isinstance(v, list) else [str(v)]
+    except ValueError:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 app.add_middleware(
-    CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
+    CORSMiddleware, allow_origins=_origins(settings.cors_origins),
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(router)

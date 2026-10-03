@@ -11,6 +11,7 @@ class RetailerProduct(BaseModel):
     affiliate_url: str | None = None  # tracked link, when the retailer API provides one
     image_url: str  # best (largest) image we could find
     image_urls: list[str] = []
+    category: str = "other"  # outerwear | tops | dresses | bottoms | shoes | bags | accessories | other
 
 
 class Retailer:

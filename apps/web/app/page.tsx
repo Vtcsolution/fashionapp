@@ -1,6 +1,10 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CATEGORY_LABEL, groupByCategory, keyOf, removeCategory, selectedList, toggleSelect, tryOnReadiness,
+  type Selection,
+} from "../lib/selection";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -14,6 +18,7 @@ type Product = {
   affiliate_url: string | null;
   image_url: string;
   image_urls: string[];
+  category: string;
 };
 type Verification = { overall: string; checks: Record<string, string>; notes: string };
 type Job = {
@@ -29,30 +34,49 @@ type Job = {
 const CHECK_LABELS: Record<string, string> = {
   product_presence: "Product presence",
   product_correspondence: "Product correspondence",
-  color_details: "Color / details correspondence",
+  color_details: "Color / details",
   placement: "Placement",
-  identity_preserved: "Person identity preserved",
+  identity_preserved: "Identity preserved",
 };
 const tone = (v: string) =>
-  v === "PASS" ? "bg-green-100 text-green-800" : v === "FAIL" ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-800";
+  v === "PASS" ? "bg-emerald-100 text-emerald-800" : v === "FAIL" ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-800";
 const shopUrl = (p: { url: string; affiliate_url: string | null }) => p.affiliate_url || p.url;
-const price = (p: { price: string | null; currency: string | null }) => (p.price ? `${p.price} ${p.currency ?? ""}` : "—");
+const price = (p: { price: string | null; currency: string | null }) => (p.price ? `${p.price} ${p.currency ?? ""}` : "Price on site");
+const retailerName = (r: string) => (r === "aliexpress" ? "AliExpress" : r === "ebay" ? "eBay" : r);
+
+function StepTitle({ n, title, hint }: { n: number; title: string; hint?: string }) {
+  return (
+    <div className="mb-3 flex items-baseline gap-3">
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black text-sm font-bold text-white">{n}</span>
+      <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+      {hint && <span className="text-sm text-gray-500">{hint}</span>}
+    </div>
+  );
+}
 
 export default function Page() {
-  const [mode, setMode] = useState<string>("");
+  const [mode, setMode] = useState("");
   const [personPath, setPersonPath] = useState<string | null>(null);
   const [personUrl, setPersonUrl] = useState<string | null>(null);
-  const [query, setQuery] = useState("blue floral women's dress");
+  const [prompt, setPrompt] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
+  const [searched, setSearched] = useState<string[]>([]);
   const [retailerStatus, setRetailerStatus] = useState<Record<string, string>>({});
-  const [selected, setSelected] = useState<Product | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [selection, setSelection] = useState<Selection<Product>>({});
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch(`${API}/api/health`).then((r) => r.json()).then((j) => setMode(j.vto_mode)).catch(() => setMode("offline"));
   }, []);
+
+  const groups = useMemo(() => groupByCategory(products), [products]);
+  const picked = selectedList(selection);
+  const readiness = tryOnReadiness(!!personPath, picked.length);
 
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const r = await fetch(`${API}${path}`, init);
@@ -75,7 +99,7 @@ export default function Page() {
   };
 
   const upload = (f: File) =>
-    guard("Uploading photo…", async () => {
+    guard("Uploading your photo…", async () => {
       const fd = new FormData();
       fd.append("file", f);
       const j = await call<{ person_path: string; url: string }>("/api/uploads/person", { method: "POST", body: fd });
@@ -83,25 +107,35 @@ export default function Page() {
       setPersonUrl(`${API}${j.url}`);
       setJob(null);
     });
+  const removePhoto = () => {
+    setPersonPath(null);
+    setPersonUrl(null);
+    setJob(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
 
   const search = () =>
-    guard("Searching retailers…", async () => {
-      const j = await call<{ products: Product[]; retailers: Record<string, string> }>(
-        `/api/products/search?q=${encodeURIComponent(query)}`,
+    guard("Searching eBay and AliExpress…", async () => {
+      const j = await call<{ products: Product[]; retailers: Record<string, string>; searched: string[] }>(
+        `/api/products/search?q=${encodeURIComponent(prompt)}`,
       );
       setProducts(j.products);
       setRetailerStatus(j.retailers);
-      setSelected(null);
+      setSearched(j.searched);
+      setHasSearched(true);
+      setSelection({});
+      setJob(null);
     });
 
-  // One click = one request = at most one generation. The backend never retries, and neither does this page.
+  // One click = one request = at most one generation. Never retried here or in the backend.
   const tryOn = () =>
-    guard(mode === "live" ? "Running LIVE FASHN try-on (one generation)…" : "Running mock try-on…", async () => {
-      if (!selected || !personPath) return;
+    guard(mode === "live" ? "Creating your try-on…" : "Creating a mock try-on…", async () => {
+      if (!readiness.ok || !personPath) return;
+      const chosen = picked[0];
       const sel = await call<{ id: number }>("/api/products/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(selected),
+        body: JSON.stringify(chosen),
       });
       setJob(
         await call<Job>("/api/tryon", {
@@ -110,108 +144,202 @@ export default function Page() {
           body: JSON.stringify({ product_id: sel.id, person_path: personPath }),
         }),
       );
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     });
 
-  const live = mode === "live";
+  const scrollToCategory = (c: string) => document.getElementById(`cat-${c}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   return (
-    <main className="mx-auto max-w-6xl space-y-8 p-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-bold">TryOnU — Virtual Try-On MVP</h1>
-        <p className="text-sm text-gray-600">One person + one real product → one try-on → review → shop the real product.</p>
+    <div className="min-h-screen bg-gradient-to-b from-violet-50 via-white to-white text-gray-900">
+      <header className="mx-auto max-w-6xl px-6 pt-10 pb-4 text-center">
+        <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl">
+          Try<span className="text-violet-600">On</span>U
+        </h1>
+        <p className="mt-2 text-lg text-gray-600">Describe an outfit. Pick real products. See yourself in them.</p>
         {mode && (
-          <p className={`inline-block rounded px-2 py-1 text-xs font-semibold ${live ? "bg-red-100 text-red-800" : mode === "mock" ? "bg-amber-100 text-amber-800" : "bg-gray-200"}`}>
-            {live ? "LIVE — a real FASHN generation will be requested" : mode === "mock" ? "MOCK MODE — no FASHN calls, no credits used" : "API offline"}
+          <p className={`mt-3 inline-block rounded-full px-3 py-1 text-xs font-semibold ${mode === "live" ? "bg-red-100 text-red-800" : mode === "mock" ? "bg-amber-100 text-amber-800" : "bg-gray-200 text-gray-700"}`}>
+            {mode === "live" ? "LIVE — real FASHN generation" : mode === "mock" ? "Demo mode — mock try-on, no credits used" : "API offline — start the backend"}
           </p>
         )}
       </header>
 
-      {error && <div className="rounded border border-red-300 bg-red-50 p-3 text-red-800">{error}</div>}
-      {busy && <div className="rounded border bg-blue-50 p-3 text-blue-800">⏳ {busy}</div>}
+      <main className="mx-auto max-w-6xl space-y-12 px-6 pb-24">
+        {error && <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-red-800">{error}</div>}
+        {busy && <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 text-violet-800">⏳ {busy}</div>}
 
-      <section className="space-y-2">
-        <h2 className="font-semibold">A. Upload person</h2>
-        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
-        {personUrl && <img src={personUrl} alt="You" className="h-56 rounded border object-cover" />}
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="font-semibold">B. Search products</h2>
-        <div className="flex gap-2">
-          <input className="flex-1 rounded border p-2" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && search()} />
-          <button className="rounded bg-black px-4 py-2 text-white disabled:opacity-50" disabled={!!busy} onClick={search}>Search</button>
-        </div>
-        {Object.keys(retailerStatus).length > 0 && (
-          <p className="text-xs text-gray-500">{Object.entries(retailerStatus).map(([k, v]) => `${k}: ${v}`).join(" · ")}</p>
-        )}
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          {products.map((p) => {
-            const on = selected?.retailer === p.retailer && selected.product_id === p.product_id;
-            return (
-              <div key={p.retailer + p.product_id} className={`rounded border p-2 text-sm ${on ? "ring-2 ring-black" : ""}`}>
-                <img src={p.image_url} alt={p.name} className="h-48 w-full rounded object-contain" />
-                <p className="mt-1 line-clamp-2 font-medium">{p.name}</p>
-                <p>{price(p)} · <span className="uppercase text-gray-500">{p.retailer}</span></p>
-                <div className="mt-1 flex items-center justify-between">
-                  <a href={shopUrl(p)} target="_blank" rel="noreferrer" className="text-blue-600 underline">Shop</a>
-                  <button className="rounded border px-2 py-1" onClick={() => setSelected(p)}>{on ? "Selected" : "Select"}</button>
+        {/* 1. Upload */}
+        <section>
+          <StepTitle n={1} title="Upload your photo" hint="A clear, full-body photo works best" />
+          {personUrl ? (
+            <div className="flex items-center gap-5 rounded-2xl border bg-white p-4 shadow-sm">
+              <img src={personUrl} alt="You" className="h-44 w-32 rounded-xl object-cover" />
+              <div className="space-y-2">
+                <p className="font-medium">Looking good. This photo will be used for your try-on.</p>
+                <div className="flex gap-2">
+                  <button className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50" onClick={() => fileRef.current?.click()}>Replace</button>
+                  <button className="rounded-lg border px-3 py-1.5 text-sm text-red-700 hover:bg-red-50" onClick={removePhoto}>Remove</button>
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="font-semibold">C. Selected product</h2>
-        {personUrl && selected ? (
-          <div className="flex flex-wrap items-center gap-6 rounded border p-3">
-            <img src={personUrl} alt="Person" className="h-40 rounded border object-cover" />
-            <span className="text-2xl">+</span>
-            <img src={selected.image_url} alt={selected.name} className="h-40 rounded border object-contain" />
-            <div className="space-y-1 text-sm">
-              <p className="font-medium">{selected.name}</p>
-              <p>{price(selected)} · <span className="uppercase">{selected.retailer}</span></p>
-              <a href={shopUrl(selected)} target="_blank" rel="noreferrer" className="text-blue-600 underline">Open product page</a>
             </div>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500">Upload a photo and select one product.</p>
-        )}
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="font-semibold">D. Try on</h2>
-        <button className="rounded bg-purple-700 px-5 py-2 text-white disabled:opacity-50" disabled={!personPath || !selected || !!busy} onClick={tryOn}>
-          TRY ON
-        </button>
-      </section>
-
-      {job && (
-        <section className="space-y-3">
-          <h2 className="font-semibold">E. Result — job #{job.id} · {job.status} · provider: {job.provider}</h2>
-          {job.provider === "mock" && <p className="rounded bg-amber-50 p-2 text-sm text-amber-800">Mock result — not a real try-on. No credits were used.</p>}
-          {job.error && <p className="rounded border border-red-300 bg-red-50 p-2 text-red-800">Failed: {job.error}. Nothing was retried.</p>}
-          <div className="grid gap-4 md:grid-cols-3">
-            <figure><img src={`${API}${job.person_url}`} alt="Person" className="rounded border" /><figcaption className="text-sm">Original</figcaption></figure>
-            <figure><img src={`${API}${job.product.image_url}`} alt="Product" className="rounded border" /><figcaption className="text-sm">{job.product.name} · {price(job.product)}</figcaption></figure>
-            <figure>
-              {job.result ? <img src={`${API}${job.result.url}`} alt="Try-on" className="rounded border" /> : <div className="flex h-64 items-center justify-center rounded border text-gray-400">No result</div>}
-              <figcaption className="text-sm">{job.provider === "fashn" ? "Raw FASHN output" : "Mock output"}</figcaption>
-            </figure>
-          </div>
-          {job.result && (
-            <div className="space-y-1">
-              <p className="text-sm font-semibold">Verification: <span className={`rounded px-2 py-0.5 ${tone(job.result.verification.overall)}`}>{job.result.verification.overall.replace("_", " ")}</span></p>
-              {Object.entries(job.result.verification.checks).map(([k, v]) => (
-                <p key={k} className="text-sm">{CHECK_LABELS[k] ?? k}: <span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(v)}`}>{v.replace("_", " ")}</span></p>
-              ))}
-              <p className="text-xs text-gray-600">{job.result.verification.notes}</p>
-            </div>
+          ) : (
+            <button onClick={() => fileRef.current?.click()} className="flex h-44 w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-300 bg-white text-gray-600 transition hover:border-violet-500 hover:bg-violet-50">
+              <span className="text-3xl">📷</span>
+              <span className="mt-1 font-medium">Click to upload a photo</span>
+              <span className="text-xs text-gray-400">JPG, PNG or WebP</span>
+            </button>
           )}
-          <a href={shopUrl(job.product)} target="_blank" rel="noreferrer" className="inline-block rounded bg-green-700 px-5 py-2 text-white">Shop Product</a>
+          <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
         </section>
-      )}
-    </main>
+
+        {/* 2. Prompt */}
+        {personPath && (
+          <section>
+            <StepTitle n={2} title="What do you want to wear?" />
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                className="flex-1 rounded-xl border bg-white p-4 text-lg shadow-sm outline-none focus:ring-2 focus:ring-violet-400"
+                placeholder="e.g. black leather jacket with white sneakers"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && prompt.trim() && !busy && search()}
+              />
+              <button className="rounded-xl bg-violet-600 px-8 py-4 text-lg font-bold text-white shadow hover:bg-violet-700 disabled:opacity-50" disabled={!prompt.trim() || !!busy} onClick={search}>
+                SEARCH
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-gray-500">Try: “red dress with black heels and handbag” · add a budget like “under $100”</p>
+          </section>
+        )}
+
+        {/* 3-5. Products by category */}
+        {personPath && hasSearched && (
+          <section className="space-y-6">
+            <StepTitle n={3} title="Pick your items" hint="One per category" />
+            <p className="text-xs text-gray-500">
+              Searched: {searched.map((s) => `“${s}”`).join(", ")} · {Object.entries(retailerStatus).map(([k, v]) => `${retailerName(k)}: ${v}`).join(" · ")}
+            </p>
+            {groups.length === 0 && <p className="rounded-xl border bg-white p-6 text-gray-600">No products found. Try different words.</p>}
+            {groups.map(({ category, items }) => (
+              <div key={category} id={`cat-${category}`} className="scroll-mt-6">
+                <h3 className="mb-2 text-sm font-bold uppercase tracking-widest text-gray-500">
+                  {CATEGORY_LABEL[category] ?? category} <span className="font-normal normal-case text-gray-400">({items.length})</span>
+                </h3>
+                <div className="flex gap-4 overflow-x-auto pb-2">
+                  {items.map((p) => {
+                    const on = selection[category] && keyOf(selection[category]) === keyOf(p);
+                    return (
+                      <div key={keyOf(p)} className={`w-48 shrink-0 rounded-2xl border bg-white p-3 text-sm shadow-sm transition ${on ? "border-violet-600 ring-2 ring-violet-500" : "hover:shadow-md"}`}>
+                        <div className="relative">
+                          <img src={p.image_url} alt={p.name} loading="lazy" className="h-48 w-full rounded-xl bg-gray-50 object-contain" />
+                          {on && <span className="absolute right-2 top-2 rounded-full bg-violet-600 px-2 py-0.5 text-xs font-bold text-white">Selected</span>}
+                        </div>
+                        <p className="mt-2 line-clamp-2 h-10 font-medium leading-5">{p.name}</p>
+                        <p className="mt-1 font-semibold">{price(p)}</p>
+                        <p className="text-xs text-gray-500">{retailerName(p.retailer)}</p>
+                        <div className="mt-2 flex items-center justify-between">
+                          <a href={shopUrl(p)} target="_blank" rel="noreferrer" className="text-xs text-violet-700 underline">View</a>
+                          <button onClick={() => setSelection((s) => toggleSelect(s, p))} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${on ? "bg-violet-600 text-white" : "border hover:bg-gray-50"}`}>
+                            {on ? "Remove" : "Select"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {/* Selected items */}
+        {personPath && picked.length > 0 && (
+          <section>
+            <StepTitle n={4} title="Your selected items" hint={`${picked.length} selected`} />
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {picked.map((p) => (
+                <div key={keyOf(p)} className="flex gap-3 rounded-2xl border bg-white p-3 shadow-sm">
+                  <img src={p.image_url} alt={p.name} className="h-24 w-24 shrink-0 rounded-xl bg-gray-50 object-contain" />
+                  <div className="min-w-0 flex-1 text-sm">
+                    <p className="text-xs font-bold uppercase tracking-widest text-gray-400">{CATEGORY_LABEL[p.category] ?? p.category}</p>
+                    <p className="line-clamp-2 font-medium leading-5">{p.name}</p>
+                    <p className="font-semibold">{price(p)} <span className="font-normal text-gray-500">· {retailerName(p.retailer)}</span></p>
+                    <div className="mt-1 flex gap-3 text-xs">
+                      <button className="text-violet-700 underline" onClick={() => scrollToCategory(p.category)}>Change</button>
+                      <button className="text-red-700 underline" onClick={() => setSelection((s) => removeCategory(s, p.category))}>Remove</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* TRYON U */}
+        {personPath && hasSearched && (
+          <section className="text-center">
+            <button
+              onClick={tryOn}
+              disabled={!readiness.ok || !!busy}
+              className="rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 px-14 py-5 text-2xl font-extrabold tracking-wide text-white shadow-lg transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100"
+            >
+              TRYON U
+            </button>
+            {!readiness.ok && <p className={`mx-auto mt-3 max-w-xl text-sm ${picked.length > 1 ? "rounded-lg bg-amber-50 p-3 text-amber-800" : "text-gray-500"}`}>{readiness.message}</p>}
+          </section>
+        )}
+
+        {/* Result */}
+        {job && (
+          <section ref={resultRef} className="scroll-mt-6">
+            <StepTitle n={5} title="Your try-on" />
+            {job.provider === "mock" && <p className="mb-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Demo result — this is a placeholder, not a real try-on. No credits were used.</p>}
+            {job.error && <p className="mb-3 rounded-xl border border-red-300 bg-red-50 p-3 text-red-800">Try-on failed: {job.error}. Nothing was retried.</p>}
+            <div className="grid gap-8 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+              <div>
+                {job.result ? (
+                  <img src={`${API}${job.result.url}`} alt="Your try-on" className="w-full rounded-2xl border shadow-lg" />
+                ) : (
+                  <div className="flex h-96 items-center justify-center rounded-2xl border bg-white text-gray-400">No image generated</div>
+                )}
+                <p className="mt-2 text-xs text-gray-500">{job.provider === "fashn" ? "Raw FASHN output, unedited." : "Mock output."}</p>
+              </div>
+              <div className="space-y-5">
+                {job.result && (
+                  <div className="rounded-2xl border bg-white p-4 shadow-sm">
+                    <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Verification</p>
+                    <p className={`mt-1 inline-block rounded-lg px-3 py-1 text-lg font-bold ${tone(job.result.verification.overall)}`}>
+                      {job.result.verification.overall.replace("_", " ")}
+                    </p>
+                    <ul className="mt-3 space-y-1 text-sm">
+                      {Object.entries(job.result.verification.checks).map(([k, v]) => (
+                        <li key={k} className="flex items-center justify-between">
+                          <span>{CHECK_LABELS[k] ?? k}</span>
+                          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${tone(v)}`}>{v.replace("_", " ")}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-3 text-xs text-gray-500">{job.result.verification.notes}</p>
+                  </div>
+                )}
+                <div className="rounded-2xl border bg-white p-4 shadow-sm">
+                  <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Product</p>
+                  <div className="mt-2 flex gap-3">
+                    <img src={`${API}${job.product.image_url}`} alt={job.product.name} className="h-28 w-28 rounded-xl bg-gray-50 object-contain" />
+                    <div className="text-sm">
+                      <p className="line-clamp-3 font-medium">{job.product.name}</p>
+                      <p className="mt-1 font-semibold">{price(job.product)}</p>
+                      <p className="text-gray-500">{retailerName(job.product.retailer)}</p>
+                    </div>
+                  </div>
+                  <a href={shopUrl(job.product)} target="_blank" rel="noreferrer" className="mt-4 block rounded-xl bg-black py-3 text-center font-bold tracking-wide text-white hover:bg-gray-800">
+                    SHOP PRODUCT
+                  </a>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
   );
 }

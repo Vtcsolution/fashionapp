@@ -404,8 +404,8 @@ def test_combined_search_never_calls_cj_or_rakuten(monkeypatch):
     class R(_Fake):
         async def search(self, q, limit=10, max_price=None):
             seen[self.name] = (q, max_price)
-            return [RetailerProduct(retailer=self.name, product_id=f"{self.name}1", name="Black sneaker",
-                                    price="59.00", currency="USD", url="u", image_url="i")] * 2
+            return [RetailerProduct(retailer=self.name, product_id=f"{self.name}{i}", name="Black sneaker",
+                                    price="59.00", currency="USD", url="u", image_url="i") for i in (1, 2)]
 
     monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay"), R("aliexpress")])
     body = c.get("/api/products/search", params={"q": "black sneakers under $100"}).json()
@@ -434,3 +434,72 @@ def test_price_cap_enforced_even_if_retailer_ignores_it(monkeypatch):
 
 def test_unconfigured_cj_rakuten_do_not_affect_health_or_search():
     assert c.get("/api/health").status_code == 200  # works regardless of CJ/Rakuten credentials
+
+
+# ---------- categories + multi-item prompts ----------
+from app.services.categorize import categorize  # noqa: E402
+from app.services.retailers.aggregator import split_prompt  # noqa: E402
+
+
+@pytest.mark.parametrize("title,cat", [
+    ("Men Leather Biker Jacket", "outerwear"), ("Women's Wool Coat Long", "outerwear"),
+    ("Cotton Crew Neck T-Shirt", "tops"), ("Oversized Hoodie Sweatshirt", "tops"),
+    ("Floral Maxi Dress", "dresses"), ("Skinny Stretch Jeans", "bottoms"), ("Pleated Mini Skirt", "bottoms"),
+    ("Nike Court Vision Black Sneakers", "shoes"), ("Block Heels Ankle Boots", "shoes"),
+    ("Leather Crossbody Handbag", "bags"), ("Silver Wrist Watch", "accessories"), ("Polarized Sunglasses", "accessories"),
+    ("Dress Shoes Oxford", "shoes"),          # priority: shoes before dresses
+    ("Top Handle Bag Women", "bags"),         # priority: bags before tops
+    ("Denim Jacket", "outerwear"),
+    ("Milwaukee Women's Black Leather Motorcycle Rider Jacket with Belt Size XL", "outerwear"),  # tail ignored
+    ("Anime Cosplay King of Fighters Leather Jacket Gloves Pants Belt", "other"),  # costume set: not guessed
+    ("Red Michael Jackson Thriller Costume Full Set", "other"),
+    ("Gaming Mouse Pad", "other"), ("Water Aqua Sock Beach", "other"), ("", "other"),  # never forced
+])
+def test_categorize(title, cat):
+    assert categorize(title) == cat
+
+
+def test_split_prompt_items():
+    assert split_prompt("black leather jacket with white sneakers") == ["black leather jacket", "white sneakers"]
+    assert split_prompt("red dress with black heels and handbag") == ["red dress", "black heels", "handbag"]
+    assert split_prompt("black and white sneakers") == ["black and white sneakers"]  # colors stay together
+    assert split_prompt("leather sandals") == ["leather sandals"] and split_prompt("handbag") == ["handbag"]
+    assert len(split_prompt("a, b, c, d, e, f")) == 4  # capped
+
+
+def test_search_groups_each_item_and_labels_categories(monkeypatch):
+    calls = []
+
+    class R(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            calls.append((self.name, q))
+            title = {"black leather jacket": "Black Leather Jacket", "white sneakers": "White Sneakers Low"}[q]
+            return [RetailerProduct(retailer=self.name, product_id=f"{self.name}-{q}", name=title, price="40",
+                                    currency="USD", url="u", image_url="i")]
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay"), R("aliexpress")])
+    body = c.get("/api/products/search", params={"q": "black leather jacket with white sneakers"}).json()
+    assert body["searched"] == ["black leather jacket", "white sneakers"]
+    assert sorted(calls) == sorted((r, q) for r in ("ebay", "aliexpress") for q in body["searched"])
+    cats = {(p["retailer"], p["category"]) for p in body["products"]}
+    assert cats == {("ebay", "outerwear"), ("aliexpress", "outerwear"), ("ebay", "shoes"), ("aliexpress", "shoes")}
+    assert body["retailers"] == {"ebay": "ok (2)", "aliexpress": "ok (2)"}
+
+
+def test_multi_item_search_survives_one_retailer_failing(monkeypatch):
+    class R(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            if self.fail:
+                raise RuntimeError("down")
+            return [RetailerProduct(retailer=self.name, product_id=q, name="Red Dress", url="u", image_url="i")]
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay", fail=True), R("aliexpress")])
+    body = c.get("/api/products/search", params={"q": "red dress with black heels"}).json()
+    assert {p["retailer"] for p in body["products"]} == {"aliexpress"} and len(body["products"]) == 2
+    assert body["retailers"]["ebay"].startswith("error") and body["retailers"]["aliexpress"].startswith("ok")
+
+
+def test_try_on_still_accepts_exactly_one_product():
+    from app.api.routes import TryOnRequest
+
+    assert set(TryOnRequest.model_fields) == {"product_id", "person_path"}  # no list of products
