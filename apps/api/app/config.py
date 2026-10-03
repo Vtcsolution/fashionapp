@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     rakuten_client_secret: str = ""
     rakuten_account_id: str = ""
 
+    # OpenAI / Gemini: prompt understanding and visual verification ONLY. Never image generation.
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1"
+    gemini_api_key: str = ""
+    # Text+vision model (alias that tracks the current Pro). Override with GEMINI_VISION_MODEL.
+    # GEMINI_IMAGE_MODEL in .env is an image-GENERATION model and is deliberately NOT used.
+    gemini_vision_model: str = "gemini-pro-latest"
+    verification_mode: str = "auto"  # auto: LLM verification for real FASHN results, placeholder for mock | llm | placeholder
+
     # FASHN
     fashn_api_key: str = ""
     fashn_model: str = "tryon-max"
@@ -43,6 +52,8 @@ class Settings(BaseSettings):
             "cj": bool(self.cj_api_token and self.cj_company_id),
             "rakuten": bool(self.rakuten_enabled and self.rakuten_client_id and self.rakuten_client_secret),
             "fashn_key": bool(self.fashn_api_key),
+            "openai": bool(self.openai_api_key),
+            "gemini": bool(self.gemini_api_key),
         }
 
 

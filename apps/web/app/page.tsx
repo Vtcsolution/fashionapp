@@ -40,13 +40,15 @@ type Run = { id: number; status: string; total_steps: number; person_url: string
 const CHECK_LABELS: Record<string, string> = {
   product_presence: "Product presence",
   product_correspondence: "Product correspondence",
-  color_details: "Color / details",
+  color: "Color",
+  details: "Distinctive details",
+  earlier_items_preserved: "Earlier items preserved",
   placement: "Placement",
   identity_preserved: "Identity preserved",
 };
 const tone = (v: string) =>
   ["PASS", "PRESENT", "VERIFIED", "COMPLETE"].includes(v) ? "bg-emerald-100 text-emerald-800"
-    : ["FAIL", "FAILED", "ABSENT"].includes(v) ? "bg-red-100 text-red-800"
+    : ["FAIL", "FAILED", "REJECTED", "ABSENT"].includes(v) ? "bg-red-100 text-red-800"
     : ["PLANNED", "SKIPPED", "NOT_GENERATED"].includes(v) ? "bg-gray-100 text-gray-600"
     : "bg-amber-100 text-amber-800";
 const label = (v: string) => v.replace(/_/g, " ");
@@ -72,6 +74,7 @@ export default function Page() {
   const [prompt, setPrompt] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
   const [searched, setSearched] = useState<string[]>([]);
+  const [parser, setParser] = useState("");
   const [retailerStatus, setRetailerStatus] = useState<Record<string, string>>({});
   const [hasSearched, setHasSearched] = useState(false);
   const [selection, setSelection] = useState<Selection<Product>>({});
@@ -139,12 +142,13 @@ export default function Page() {
 
   const search = () =>
     guard("Searching eBay and AliExpress…", async () => {
-      const j = await call<{ products: Product[]; retailers: Record<string, string>; searched: string[] }>(
+      const j = await call<{ products: Product[]; retailers: Record<string, string>; searched: string[]; parser: string }>(
         `/api/products/search?q=${encodeURIComponent(prompt)}`,
       );
       setProducts(j.products);
       setRetailerStatus(j.retailers);
       setSearched(j.searched);
+      setParser(j.parser);
       setHasSearched(true);
       setSelection({});
       setRun(null);
@@ -191,7 +195,7 @@ export default function Page() {
   const steps = run?.steps ?? [];
   const finished = steps.filter((s) => s.status === "VERIFIED" && s.result);
   const final = finished[finished.length - 1];
-  const failed = steps.find((s) => s.status === "FAILED");
+  const failed = steps.find((s) => s.status === "FAILED" || s.status === "REJECTED");
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-violet-50 via-white to-white text-gray-900">
@@ -253,7 +257,7 @@ export default function Page() {
                 SEARCH
               </button>
             </div>
-            <p className="mt-2 text-xs text-gray-500">Up to 4 items per search · separate items with commas or “with” · add a budget like “under $100”</p>
+            <p className="mt-2 text-xs text-gray-500">Up to 6 items per search · separate items with commas · add a budget like “under $100”</p>
           </section>
         )}
 
@@ -262,7 +266,7 @@ export default function Page() {
           <section className="space-y-6">
             <StepTitle n={3} title="Pick your items" hint="One per category — pick as many categories as you like" />
             <p className="text-xs text-gray-500">
-              Searched: {searched.map((s) => `“${s}”`).join(", ")} · {Object.entries(retailerStatus).map(([k, v]) => `${retailerName(k)}: ${v}`).join(" · ")}
+              Understood{parser === "openai" ? " by OpenAI" : ""} as: {searched.map((s) => `“${s}”`).join(", ")} · {Object.entries(retailerStatus).map(([k, v]) => `${retailerName(k)}: ${v}`).join(" · ")}
             </p>
             {groups.length === 0 && <p className="rounded-xl border bg-white p-6 text-gray-600">No products found. Try different words.</p>}
             {groups.map(({ category, items }) => (
@@ -348,7 +352,7 @@ export default function Page() {
                   ))}
                 </ol>
                 <p className="mt-2 text-xs text-gray-500">
-                  Each step starts from the previous result. {live && credits ? `Uses ${cost} FASHN credits.` : "Demo mode: free."}
+                  Each step starts from the previous result and is checked by OpenAI + Gemini{live ? "" : " (demo mode skips this)"}. {live && credits ? `Uses ${cost} FASHN credits.` : "Demo mode: free."}
                 </p>
               </div>
             )}
@@ -363,7 +367,7 @@ export default function Page() {
             {steps.some((s) => s.provider === "mock") && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Demo result — a placeholder, not a real try-on. No credits were used.</p>}
             {failed && (
               <p className="rounded-xl border border-red-300 bg-red-50 p-3 text-red-800">
-                Step {failed.step} ({failed.product.name.slice(0, 50)}) failed: {failed.error}. Nothing was retried; later steps were skipped.
+                Step {failed.step} ({failed.product.name.slice(0, 50)}) {failed.status === "REJECTED" ? "was rejected by verification" : "failed"}: {failed.error}. Nothing was retried; later steps were skipped.
                 {finished.length > 0 ? ` Showing the result after step ${finished.length}.` : ""}
               </p>
             )}

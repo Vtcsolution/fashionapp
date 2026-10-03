@@ -64,3 +64,15 @@ def is_relevant(part: str, title: str) -> bool:
     if noun == "dress" and not _has_real_dress(title_words):
         return False
     return any(_stem(w) == noun or _stem(w).endswith(noun) for w in title_words)  # 'tshirt'/'handbag' still match
+
+
+def color_rank(query: str, title: str) -> int:
+    """Sort key: 0 = matches the requested color (or none was requested), 1 = title names no color,
+    2 = title names a different color. Used to rank, never to hide."""
+    asked = _COLORS & set(_words(query))
+    if not asked:
+        return 0
+    in_title = _COLORS & set(_words(title))
+    if asked & in_title:
+        return 0
+    return 1 if not in_title else 2

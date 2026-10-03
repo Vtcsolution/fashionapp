@@ -27,6 +27,11 @@ def png():
 @pytest.fixture(autouse=True)
 def safety(monkeypatch):
     """Every test: live FASHN off, and any REAL network request to fashn.ai is impossible."""
+    from app.config import settings
+
+    # No test may reach a paid API: keys are blank unless a test sets them together with a mock transport.
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(settings, "gemini_api_key", "")
     monkeypatch.delenv("FASHN_LIVE_ENABLED", raising=False)
     monkeypatch.delenv("FASHN_LIVE_AUTHORIZATION", raising=False)
 
@@ -35,6 +40,8 @@ def safety(monkeypatch):
     async def guarded(self, request):
         if request.url.host.endswith("fashn.ai"):
             raise AssertionError("TEST TRIED TO CALL THE REAL FASHN API")
+        if request.url.host in ("api.openai.com", "generativelanguage.googleapis.com"):
+            raise AssertionError("TEST TRIED TO CALL A REAL OPENAI/GEMINI API")
         return await real(self, request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", guarded)

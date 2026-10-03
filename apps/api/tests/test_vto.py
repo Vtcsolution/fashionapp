@@ -130,7 +130,7 @@ def test_search_aggregation_isolates_failures():
 
 
 def test_search_endpoint_response_schema(monkeypatch):
-    async def fake_search(q, limit=8):
+    async def fake_search(q, limit=8, items=None):
         return [RetailerProduct(retailer="ebay", product_id="1", name="Blue dress", price="9.99", currency="USD",
                                 url="https://shop/x", affiliate_url="https://aff/x", image_url="https://img/x.jpg")], {"ebay": "ok (1)"}
 
@@ -464,7 +464,7 @@ def test_split_prompt_items():
     assert split_prompt("red dress with black heels and handbag") == ["red dress", "black heels", "handbag"]
     assert split_prompt("black and white sneakers") == ["black and white sneakers"]  # colors stay together
     assert split_prompt("leather sandals") == ["leather sandals"] and split_prompt("handbag") == ["handbag"]
-    assert len(split_prompt("a, b, c, d, e, f")) == 4  # capped
+    assert len(split_prompt("a, b, c, d, e, f, g, h")) == 6  # capped at 6 items
 
 
 def test_search_groups_each_item_and_labels_categories(monkeypatch):

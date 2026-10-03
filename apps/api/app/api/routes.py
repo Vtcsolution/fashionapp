@@ -10,7 +10,8 @@ from ..models import Product, TryOnJob, TryOnResult
 from ..services.fashn.builder import CREDITS_PER_GENERATION
 from ..services.fashn.guard import credits_spent, vto_mode
 from ..services.images import ImageRejected, download_best_image, validate_image_bytes
-from ..services.retailers.aggregator import ACTIVE, parse_query, search_all, split_prompt
+from ..services.prompt_parser import parse_items
+from ..services.retailers.aggregator import ACTIVE, parse_query, search_all
 from ..services.retailers.base import RetailerProduct
 from ..services.storage import local as storage
 from ..services.tryon import run_job
@@ -32,8 +33,11 @@ def health(db: Session = Depends(get_db)):
 async def search(q: str, limit: int = 8):
     if not q.strip():
         raise HTTPException(400, "empty query")
-    products, status = await search_all(q.strip(), limit)
-    return {"products": products, "retailers": status, "searched": split_prompt(parse_query(q.strip())[0])}
+    text, _ = parse_query(q.strip())  # the budget phrase is applied as a price filter, not parsed as an item
+    items, parser = await parse_items(text)  # OpenAI text understanding, offline fallback on any problem
+    products, status = await search_all(q.strip(), limit, items=items)
+    return {"products": products, "retailers": status, "searched": [i.query for i in items], "parser": parser,
+            "items": [{"query": i.query, "category": i.category} for i in items]}
 
 
 @router.post("/uploads/person")
