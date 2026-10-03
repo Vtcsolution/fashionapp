@@ -5,6 +5,7 @@ import re
 import httpx
 
 from ..categorize import categorize
+from ..relevance import is_relevant
 from .aliexpress import AliExpress
 from .base import Retailer, RetailerProduct
 from .cj import CJ
@@ -71,7 +72,7 @@ async def search_all(query: str, limit: int = 8, retailers=None) -> tuple[list[R
     seen: set[tuple[str, str]] = set()
     ok: dict[str, int] = {}
     failed: dict[str, list[str]] = {}
-    for (r, _), res in zip(jobs, results):
+    for (r, part), res in zip(jobs, results):
         if isinstance(res, Exception):
             if isinstance(res, httpx.HTTPStatusError):  # its message embeds the URL (query may hold credentials)
                 msg = f"HTTP {res.response.status_code}: {res.response.text[:120]}"
@@ -82,12 +83,14 @@ async def search_all(query: str, limit: int = 8, retailers=None) -> tuple[list[R
             continue
         if max_price is not None:  # defensive: enforce the cap even if a retailer ignored the filter
             res = [p for p in res if _price_ok(p, max_price)]
+        kept = [p for p in res if is_relevant(part, p.name)]  # only products that match what was asked
+        res = kept
         ok[r.name] = ok.get(r.name, 0) + len(res)
         for p in res:
             key = (p.retailer, p.product_id)
             if key not in seen:
                 seen.add(key)
-                p.category = categorize(p.name)
+                p.category = categorize(part)  # the item the user asked for, not a guess from the title
                 products.append(p)
 
     status: dict[str, str] = {}

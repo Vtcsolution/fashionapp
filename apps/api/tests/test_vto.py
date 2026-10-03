@@ -125,7 +125,7 @@ class _Fake(Retailer):
 
 
 def test_search_aggregation_isolates_failures():
-    products, status = asyncio.run(search_all("x", retailers=[_Fake("a"), _Fake("b", fail=True)]))
+    products, status = asyncio.run(search_all("blue dress", retailers=[_Fake("a"), _Fake("b", fail=True)]))
     assert len(products) == 1 and status["a"].startswith("ok") and status["b"].startswith("error")
 
 
@@ -416,7 +416,7 @@ def test_combined_search_never_calls_cj_or_rakuten(monkeypatch):
 
 def test_one_retailer_failing_still_returns_the_other(monkeypatch):
     monkeypatch.setattr(aggregator, "ACTIVE", [_Fake("ebay", fail=True), _Fake("aliexpress")])
-    body = c.get("/api/products/search", params={"q": "sneakers"}).json()
+    body = c.get("/api/products/search", params={"q": "dress"}).json()
     assert [p["retailer"] for p in body["products"]] == ["aliexpress"]
     assert body["retailers"]["ebay"].startswith("error") and body["retailers"]["aliexpress"].startswith("ok")
 
@@ -424,11 +424,11 @@ def test_one_retailer_failing_still_returns_the_other(monkeypatch):
 def test_price_cap_enforced_even_if_retailer_ignores_it(monkeypatch):
     class Pricey(_Fake):
         async def search(self, q, limit=10, max_price=None):
-            return [RetailerProduct(retailer=self.name, product_id=str(i), name="n", price=pr, url="u", image_url="i")
+            return [RetailerProduct(retailer=self.name, product_id=str(i), name="Blue Dress", price=pr, url="u", image_url="i")
                     for i, pr in enumerate(["50", "150", None])]
 
     monkeypatch.setattr(aggregator, "ACTIVE", [Pricey("ebay")])
-    prices = [p["price"] for p in c.get("/api/products/search", params={"q": "x under $100"}).json()["products"]]
+    prices = [p["price"] for p in c.get("/api/products/search", params={"q": "dress under $100"}).json()["products"]]
     assert prices == ["50"]
 
 
@@ -491,7 +491,8 @@ def test_multi_item_search_survives_one_retailer_failing(monkeypatch):
         async def search(self, q, limit=10, max_price=None):
             if self.fail:
                 raise RuntimeError("down")
-            return [RetailerProduct(retailer=self.name, product_id=q, name="Red Dress", url="u", image_url="i")]
+            name = {"red dress": "Red Dress", "black heels": "Black Heels Pumps"}[q]
+            return [RetailerProduct(retailer=self.name, product_id=q, name=name, url="u", image_url="i")]
 
     monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay", fail=True), R("aliexpress")])
     body = c.get("/api/products/search", params={"q": "red dress with black heels"}).json()
@@ -503,3 +504,53 @@ def test_try_on_still_accepts_exactly_one_product():
     from app.api.routes import TryOnRequest
 
     assert set(TryOnRequest.model_fields) == {"product_id", "person_path"}  # no list of products
+
+
+# ---------- relevance: only products that match the prompt are shown ----------
+from app.services.relevance import is_relevant, main_noun  # noqa: E402
+
+
+def test_main_noun():
+    assert main_noun("white sneakers") == "sneaker" and main_noun("pakistani embroidered kurti") == "kurti"
+    assert main_noun("women long maxi dress") == "dress" and main_noun("blue jeans") == "jean"
+
+
+@pytest.mark.parametrize("part,title,ok", [
+    ("white sneakers", "Nike Court Vision White Sneakers Men", True),
+    ("handbag", "Women Leather Handbag Large Tote", True),
+    ("handbag", "Zipper Felt Bag Organizer Insert For Loewe Tote Handbag", False),   # organizer, not a bag
+    ("black leather jacket", "Womens Circus Ringmaster Tailcoat Halloween Cosplay Jacket", False),  # costume
+    ("black leather jacket", "Black Leather Biker Jacket", True),
+    ("black leather jacket", "Black Leather Wallet Men", False),                     # main noun missing
+    ("maxi dress", "Boho Floral Long Maxi Dresses Summer", True),
+    ("blue jeans", "Skinny Jeans Stretch Denim", True),
+    ("blue jeans", "Jean Paul Gaultier Le Male Perfume Spray 4.2 oz", False),         # fragrance, not jeans
+    ("handbag", "Ladies Bag Handle Wrap Silk Scarf", False),
+    ("halloween costume", "Adult Halloween Costume Witch", True),                    # user asked for it
+])
+def test_is_relevant(part, title, ok):
+    assert is_relevant(part, title) is ok
+
+
+def test_search_hides_irrelevant_products(monkeypatch):
+    class R(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            titles = ["Leather Crossbody Handbag", "Bag Organizer Insert For Handbag", "Halloween Cosplay Handbag Prop",
+                      "Silk Scarf Women"]
+            return [RetailerProduct(retailer=self.name, product_id=str(i), name=t, price="10", url="u", image_url="i")
+                    for i, t in enumerate(titles)]
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay")])
+    names = [p["name"] for p in c.get("/api/products/search", params={"q": "handbag"}).json()["products"]]
+    assert names == ["Leather Crossbody Handbag"]
+
+
+def test_category_comes_from_the_searched_item_not_the_title(monkeypatch):
+    class R(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            # a scarf whose title also mentions a bag word must still land under the "scarf" item's category
+            return [RetailerProduct(retailer=self.name, product_id=q, name="Silk Scarf Bag Handle Wrap", url="u", image_url="i")]
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay")])
+    body = c.get("/api/products/search", params={"q": "silk scarf"}).json()
+    assert [p["category"] for p in body["products"]] == ["accessories"]
