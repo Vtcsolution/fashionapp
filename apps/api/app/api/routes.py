@@ -9,7 +9,7 @@ from ..db import get_db
 from ..models import Product, TryOnJob, TryOnResult
 from ..services.fashn.guard import vto_mode
 from ..services.images import ImageRejected, download_best_image, validate_image_bytes
-from ..services.retailers.aggregator import search_all
+from ..services.retailers.aggregator import ACTIVE, search_all
 from ..services.retailers.base import RetailerProduct
 from ..services.storage import local as storage
 from ..services.tryon import run_job
@@ -21,7 +21,8 @@ MAX_PERSON_BYTES = 15 * 1024 * 1024
 @router.get("/health")
 def health():
     # booleans only; no secret values
-    return {"ok": True, "configured": settings.configured(), "vto_mode": vto_mode()}
+    return {"ok": True, "configured": settings.configured(), "vto_mode": vto_mode(),
+            "active_retailers": [r.name for r in ACTIVE]}
 
 
 @router.get("/products/search")

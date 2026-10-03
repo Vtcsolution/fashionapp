@@ -19,5 +19,5 @@ class Retailer:
     def enabled(self) -> bool:
         raise NotImplementedError
 
-    async def search(self, query: str, limit: int = 10) -> list[RetailerProduct]:
+    async def search(self, query: str, limit: int = 10, max_price: float | None = None) -> list[RetailerProduct]:
         raise NotImplementedError

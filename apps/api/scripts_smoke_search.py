@@ -3,11 +3,11 @@ import asyncio
 import sys
 
 from app.services.images import ImageRejected, download_best_image
-from app.services.retailers.aggregator import ALL, search_all
+from app.services.retailers.aggregator import ACTIVE, search_all
 
 
 async def main(q: str):
-    for r in ALL:
+    for r in ACTIVE:
         prods, status = await search_all(q, 5, retailers=[r])
         print(f"[{r.name}] enabled={r.enabled()} -> {status.get(r.name, 'skipped (not configured)')}")
         for p in prods[:2]:

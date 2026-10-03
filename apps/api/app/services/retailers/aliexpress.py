@@ -19,7 +19,7 @@ class AliExpress(Retailer):
     def enabled(self):
         return settings.configured()["aliexpress"]
 
-    async def search(self, query, limit=10):
+    async def search(self, query, limit=10, max_price=None):
         params = {
             "app_key": settings.ali_express_app_key,
             "timestamp": str(int(time.time() * 1000)),
@@ -32,6 +32,8 @@ class AliExpress(Retailer):
             "target_language": "EN",
             "ship_to_country": "US",
         }
+        if max_price:
+            params["max_sale_price"] = str(int(max_price * 100))  # AliExpress takes cents
         params["sign"] = sign(params, settings.ali_express_secret_api)
         async with httpx.AsyncClient(timeout=25) as c:
             r = await c.get("https://api-sg.aliexpress.com/sync", params=params)

@@ -30,7 +30,7 @@ class Rakuten(Retailer):
         _token.update(value=j["access_token"], exp=time.time() + int(j.get("expires_in", 3600)))
         return _token["value"]
 
-    async def search(self, query, limit=10):
+    async def search(self, query, limit=10, max_price=None):
         async with httpx.AsyncClient(timeout=25) as c:
             tok = await self._token(c)
             r = await c.get(

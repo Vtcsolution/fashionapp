@@ -117,7 +117,7 @@ class _Fake(Retailer):
     def enabled(self):
         return True
 
-    async def search(self, q, limit=10):
+    async def search(self, q, limit=10, max_price=None):
         if self.fail:
             raise RuntimeError("boom")
         return [RetailerProduct(retailer=self.name, product_id="1", name="Blue dress", price="9.99", currency="USD",
@@ -372,3 +372,65 @@ def test_tests_cannot_reach_real_fashn(png):
 
     with pytest.raises(AssertionError, match="REAL FASHN"):
         asyncio.run(go())
+
+
+# ---------- active sources: eBay + AliExpress only ----------
+from app.services.retailers import aggregator  # noqa: E402
+from app.services.retailers.aggregator import parse_query  # noqa: E402
+from app.services.retailers.cj import CJ  # noqa: E402
+from app.services.retailers.rakuten import Rakuten  # noqa: E402
+
+
+def test_active_sources_are_only_ebay_and_aliexpress():
+    assert [r.name for r in aggregator.ACTIVE] == ["ebay", "aliexpress"]
+    assert {r.name for r in aggregator.FUTURE} == {"cj", "rakuten"}  # kept for later, not searched
+    assert c.get("/api/health").json()["active_retailers"] == ["ebay", "aliexpress"]
+
+
+def test_parse_query_price_cap():
+    assert parse_query("black sneakers under $100") == ("black sneakers", 100.0)
+    assert parse_query("blue dress") == ("blue dress", None)
+    assert parse_query("red bag below 49.5") == ("red bag", 49.5)
+
+
+def test_combined_search_never_calls_cj_or_rakuten(monkeypatch):
+    async def boom(self, *a, **k):
+        raise AssertionError("CJ/Rakuten must not be called")
+
+    monkeypatch.setattr(CJ, "search", boom)
+    monkeypatch.setattr(Rakuten, "search", boom)
+    seen = {}
+
+    class R(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            seen[self.name] = (q, max_price)
+            return [RetailerProduct(retailer=self.name, product_id=f"{self.name}1", name="Black sneaker",
+                                    price="59.00", currency="USD", url="u", image_url="i")] * 2
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [R("ebay"), R("aliexpress")])
+    body = c.get("/api/products/search", params={"q": "black sneakers under $100"}).json()
+    assert seen == {"ebay": ("black sneakers", 100.0), "aliexpress": ("black sneakers", 100.0)}
+    assert [p["retailer"] for p in body["products"]] == ["ebay", "aliexpress", "ebay", "aliexpress"]  # interleaved
+    assert set(body["retailers"]) == {"ebay", "aliexpress"}
+
+
+def test_one_retailer_failing_still_returns_the_other(monkeypatch):
+    monkeypatch.setattr(aggregator, "ACTIVE", [_Fake("ebay", fail=True), _Fake("aliexpress")])
+    body = c.get("/api/products/search", params={"q": "sneakers"}).json()
+    assert [p["retailer"] for p in body["products"]] == ["aliexpress"]
+    assert body["retailers"]["ebay"].startswith("error") and body["retailers"]["aliexpress"].startswith("ok")
+
+
+def test_price_cap_enforced_even_if_retailer_ignores_it(monkeypatch):
+    class Pricey(_Fake):
+        async def search(self, q, limit=10, max_price=None):
+            return [RetailerProduct(retailer=self.name, product_id=str(i), name="n", price=pr, url="u", image_url="i")
+                    for i, pr in enumerate(["50", "150", None])]
+
+    monkeypatch.setattr(aggregator, "ACTIVE", [Pricey("ebay")])
+    prices = [p["price"] for p in c.get("/api/products/search", params={"q": "x under $100"}).json()["products"]]
+    assert prices == ["50"]
+
+
+def test_unconfigured_cj_rakuten_do_not_affect_health_or_search():
+    assert c.get("/api/health").status_code == 200  # works regardless of CJ/Rakuten credentials

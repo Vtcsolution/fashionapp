@@ -35,12 +35,13 @@ class Ebay(Retailer):
         _token.update(value=j["access_token"], exp=time.time() + int(j.get("expires_in", 7200)))
         return _token["value"]
 
-    async def search(self, query, limit=10):
+    async def search(self, query, limit=10, max_price=None):
         async with httpx.AsyncClient(timeout=20) as c:
             tok = await self._token(c)
             r = await c.get(
                 "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                params={"q": query, "limit": limit, "category_ids": "11450"},  # Clothing, Shoes & Accessories
+                params={"q": query, "limit": limit, "category_ids": "11450",  # Clothing, Shoes & Accessories
+                        **({"filter": f"price:[..{max_price:g}],priceCurrency:USD"} if max_price else {})},
                 headers={"Authorization": f"Bearer {tok}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
             )
             r.raise_for_status()

@@ -20,7 +20,7 @@ class CJ(Retailer):
     def enabled(self):
         return settings.configured()["cj"]
 
-    async def search(self, query, limit=10):
+    async def search(self, query, limit=10, max_price=None):
         async with httpx.AsyncClient(timeout=25) as c:
             r = await c.post(
                 "https://ads.api.cj.com/query",
